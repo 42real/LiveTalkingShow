@@ -1,0 +1,54 @@
+# LiveTalking runtime configuration
+# Priority: ENV > .env > config.yaml
+
+runtime:
+  # Hugging Face 镜像地址。直连 Hugging Face 不稳定时使用。
+  hf_endpoint: "https://hf-mirror.com"
+
+server:
+  # LiveTalking HTTP/WebSocket 监听地址。
+  host: "0.0.0.0"
+  # LiveTalking HTTP/WebSocket 服务端口。
+  port: 8050
+  # 上游 max_session 参数。当前 alpha 桌面链路通常只使用一个 session。
+  max_session: 1
+
+avatar:
+  # 数字人模型：wav2lip / musetalk / ultralight。
+  model: "wav2lip"
+  # data/avatars/ 下的目录名。
+  avatar_id: "wav2lip_avatar_female_model"
+  # 推理批大小。桌面助手建议 4，交互延迟比默认 16 更低。
+  batch_size: 4
+  # 当前音视频节奏按 25fps 设计。
+  fps: 25
+  # 原 LiveTalking/Wav2Lip 参数，保留兼容。
+  l: 10
+  m: 8
+  r: 10
+  modelres: 192
+  modelfile: ""
+  customvideo_config: ""
+
+tts:
+  # TTS 插件。交接主链路使用 robottts。
+  provider: "robottts"
+  # robottts 兼容 TTS 服务 HTTP 基地址。
+  server_url: "http://127.0.0.1:8036"
+  # 兼容原 LiveTalking 的默认音色/参考字段。
+  ref_file: "zh-CN-YunxiaNeural"
+  ref_text:
+  # robottts 模式：instruct2 / zero-shot。
+  robottts_mode: "instruct2"
+  # robottts WebSocket/HTTP 连接超时，单位秒。
+  robottts_connect_timeout: 10
+  # robottts WebSocket 收包等待超时，单位秒。
+  robottts_receive_timeout: 1
+
+output:
+  # 输出方式：webrtc / rtmp / rtcpush / virtualcam。
+  transport: "webrtc"
+  # rtcpush 默认推流地址。
+  push_url: "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream"
+  # 是否开启 /alpha/ws raw RGBA 透明帧输出。
+  alpha_output: true

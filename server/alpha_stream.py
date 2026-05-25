@@ -74,9 +74,9 @@ class LatestFrameHub:
         if frame is None:
             logger.warning("alpha frame skipped: frame is None")
             return
-        if frame.ndim != 3 or frame.shape[2] != 4:
+        if frame.ndim != 3 or frame.shape[2] not in (3, 4):
             logger.warning(
-                "alpha frame skipped: expected BGRA frame, got shape=%s dtype=%s",
+                "alpha frame skipped: expected BGR/BGRA frame, got shape=%s dtype=%s",
                 getattr(frame, "shape", None),
                 getattr(frame, "dtype", None),
             )
@@ -85,8 +85,12 @@ class LatestFrameHub:
         if not frame.flags["C_CONTIGUOUS"]:
             frame = np.ascontiguousarray(frame)
 
-        # OpenCV keeps 4-channel images as BGRA, while Canvas ImageData expects RGBA.
-        rgba = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
+        # OpenCV keeps images as BGR/BGRA, while Canvas ImageData expects RGBA.
+        # Non-transparent avatars are valid too; give them a fully opaque alpha.
+        if frame.shape[2] == 4:
+            rgba = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
+        else:
+            rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
         height, width = rgba.shape[:2]
         payload = rgba.tobytes()
 

@@ -22,10 +22,9 @@
 ```bash
 cd /path/to/LiveTalking/testclient
 cp .env.example .env
-set -a
-source .env
-set +a
 ```
+
+`start-tts.sh`、`start-web.sh`、`start-overlay.sh` 会自动读取 `testclient/.env`。
 
 ## 2. 启动测试 TTS 后端
 
@@ -38,9 +37,7 @@ set +a
 如果要用百炼：
 
 ```bash
-export TEST_TTS_PROVIDER=bailian
-export DASHSCOPE_API_KEY=你的百炼APIKey
-./start-tts.sh
+TEST_TTS_PROVIDER=bailian DASHSCOPE_API_KEY=你的百炼APIKey ./start-tts.sh
 ```
 
 该后端提供：
@@ -57,19 +54,9 @@ LiveTalking 仍然从仓库根目录启动，统一使用 `robottts`：
 
 ```bash
 cd /path/to/LiveTalking
-export AVATAR_ID=default_calm_1
-export LIVETALKING_PORT=8050
-export TTS_SERVER_URL=http://127.0.0.1:8036
-uv run --python .venv/bin/python python app.py \
-  --transport webrtc \
-  --model wav2lip \
-  --avatar_id "$AVATAR_ID" \
-  --batch_size 4 \
-  --tts robottts \
-  --TTS_SERVER "$TTS_SERVER_URL" \
-  --robottts_mode instruct2 \
-  --listenport "$LIVETALKING_PORT" \
-  --alpha_output
+cp .env.example .env
+HF_ENDPOINT=https://hf-mirror.com ./scripts/download-models.sh wav2lip-demo
+./entrypoint.sh
 ```
 
 ## 4. 启动可视化 Web 客户端

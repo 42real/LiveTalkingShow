@@ -53,7 +53,9 @@ function App() {
   const [logs, setLogs] = useState([]);
   const canvasRef = useRef(null);
   const socketRef = useRef(null);
-  const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0 });
+  const latestFramePacketRef = useRef(null);
+  const renderFrameRef = useRef(0);
+  const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0, fps: 0 });
 
   const addLog = useCallback((message, data) => {
     const time = new Date().toLocaleTimeString();
@@ -89,14 +91,32 @@ function App() {
     const stats = frameStatsRef.current;
     const now = performance.now();
     const elapsed = now - stats.lastAt;
-    let fps = frameInfo.fps;
+    let fps = stats.fps;
     if (elapsed >= 1000) {
       fps = ((frame.seq - stats.lastSeq) * 1000) / elapsed;
       stats.lastAt = now;
       stats.lastSeq = frame.seq;
+      stats.fps = fps;
     }
     setFrameInfo({ width: frame.width, height: frame.height, seq: frame.seq, fps });
-  }, [addLog, frameInfo.fps]);
+  }, [addLog]);
+
+  const renderLatestFrame = useCallback(() => {
+    renderFrameRef.current = 0;
+    const packet = latestFramePacketRef.current;
+    latestFramePacketRef.current = null;
+    if (packet) drawFrame(packet);
+    if (latestFramePacketRef.current && !renderFrameRef.current) {
+      renderFrameRef.current = requestAnimationFrame(renderLatestFrame);
+    }
+  }, [drawFrame]);
+
+  const enqueueVideoFrame = useCallback((packet) => {
+    latestFramePacketRef.current = packet;
+    if (!renderFrameRef.current) {
+      renderFrameRef.current = requestAnimationFrame(renderLatestFrame);
+    }
+  }, [renderLatestFrame]);
 
   const connectVideo = useCallback(() => {
     if (socketRef.current) socketRef.current.close();
@@ -109,7 +129,7 @@ function App() {
       setVideoState('connected');
       addLog('alpha 视频流已连接');
     };
-    socket.onmessage = (event) => drawFrame(event.data);
+    socket.onmessage = (event) => enqueueVideoFrame(event.data);
     socket.onerror = () => {
       setVideoState('error');
       addLog('alpha 视频流连接错误');
@@ -123,6 +143,11 @@ function App() {
   const disconnectVideo = useCallback(() => {
     socketRef.current?.close();
     socketRef.current = null;
+    latestFramePacketRef.current = null;
+    if (renderFrameRef.current) {
+      cancelAnimationFrame(renderFrameRef.current);
+      renderFrameRef.current = 0;
+    }
     setVideoState('disconnected');
   }, []);
 

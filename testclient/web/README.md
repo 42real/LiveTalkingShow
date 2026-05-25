@@ -46,19 +46,9 @@ cd /path/to/LiveTalking/testclient
 
 ```bash
 cd /path/to/LiveTalking
-export AVATAR_ID=default_calm_1
-export LIVETALKING_PORT=8050
-export TTS_SERVER_URL=http://127.0.0.1:8036
-uv run --python .venv/bin/python python app.py \
-  --transport webrtc \
-  --model wav2lip \
-  --avatar_id "$AVATAR_ID" \
-  --batch_size 4 \
-  --tts robottts \
-  --TTS_SERVER "$TTS_SERVER_URL" \
-  --robottts_mode instruct2 \
-  --listenport "$LIVETALKING_PORT" \
-  --alpha_output
+cp .env.example .env
+HF_ENDPOINT=https://hf-mirror.com ./scripts/download-models.sh wav2lip-demo
+./entrypoint.sh
 ```
 
 3. 打开测试客户端页面，先点健康检查，再点创建 alpha session，最后测试两种输入方式：
