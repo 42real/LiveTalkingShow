@@ -1,0 +1,19 @@
+{
+  "name": "livetalking-testclient-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Visual robottts-compatible TTS and LiveTalking alpha test client.",
+  "scripts": {
+    "start": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {}
+}

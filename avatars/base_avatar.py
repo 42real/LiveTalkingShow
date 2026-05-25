@@ -95,7 +95,8 @@ class BaseAvatar:
             'doubao': 'tts.doubao',
             'indextts2': 'tts.indextts2',
             'azuretts': 'tts.azure',
-            'qwentts': 'tts.qwentts'
+            'qwentts': 'tts.qwentts',
+            'robottts': 'tts.robottts',
         }
 
         if opt.tts in _tts_modules:
@@ -436,7 +437,8 @@ class BaseAvatar:
                 else:
                     combine_frame = current_frame
 
-            cv2.putText(combine_frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
+            if not (getattr(self.opt, "alpha_output", False) and combine_frame.ndim == 3 and combine_frame.shape[2] == 4):
+                cv2.putText(combine_frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
             
             # 使用统一输出接口推送视频帧
             self.output.push_video_frame(combine_frame)
@@ -489,4 +491,3 @@ class BaseAvatar:
 
         process_quit_event.set()
         process_thread.join()
-

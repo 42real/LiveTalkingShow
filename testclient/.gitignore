@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.log
+backend/.venv/
+backend/__pycache__/
+backend/*.py[cod]
+web/node_modules/
+web/dist/
+overlay/node_modules/
+overlay/snapshots/
+overlay/*.log
+overlay/test-alpha-*

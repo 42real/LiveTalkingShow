@@ -1,0 +1,20 @@
+[project]
+name = "livetalking-testclient-robottts"
+version = "0.1.0"
+description = "Self-contained robottts-compatible test backend for LiveTalking."
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "edge-tts>=7.0.0",
+    "numpy>=1.23.0",
+    "resampy>=0.4.3",
+    "soundfile==0.12.1",
+    "websockets>=14.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

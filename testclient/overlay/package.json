@@ -1,0 +1,14 @@
+{
+  "name": "livetalking-testclient-overlay",
+  "version": "0.1.0",
+  "description": "Transparent always-on-top LiveTalking alpha overlay",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "41.6.1"
+  },
+  "devDependencies": {}
+}

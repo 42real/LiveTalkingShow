@@ -64,19 +64,22 @@ class RTCManager:
         )
         self.pcs.add(pc)
 
+        # 添加发送轨道
+        from server.webrtc import HumanPlayer
+        player = HumanPlayer(avatar_session)
+        if getattr(self.opt, "alpha_output", False):
+            player.start()
+        pc.addTrack(player.audio)
+        pc.addTrack(player.video)
+
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
             logger.info("Connection state is %s", pc.connectionState)
             if pc.connectionState in ("failed", "closed"):
+                player.stop_worker()
                 await pc.close()
                 self.pcs.discard(pc)
                 session_manager.remove_session(sessionid)
-
-        # 添加发送轨道
-        from server.webrtc import HumanPlayer
-        player = HumanPlayer(avatar_session)
-        pc.addTrack(player.audio)
-        pc.addTrack(player.video)
 
         # 设置编解码器偏好
         capabilities = RTCRtpSender.getCapabilities("video")

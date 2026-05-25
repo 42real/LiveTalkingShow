@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def read_imgs(img_list):
     def load_image(index, img_path):
-        return index, cv2.imread(img_path)
+        return index, cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
 
     frames = [None] * len(img_list)  # Initialize a list with the same length as img_list
     with ThreadPoolExecutor() as executor:
@@ -29,4 +29,4 @@ def mirror_index(size, index):
     if turn % 2 == 0:
         return res
     else:
-        return size - res - 1 
+        return size - res - 1

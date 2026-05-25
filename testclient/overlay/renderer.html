@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LiveTalking 控制台</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <section id="panel">
+    <input id="server" value="http://127.0.0.1:8050" />
+    <input id="sessionid" value="" placeholder="session" />
+    <textarea id="text">你好，我是桌面数字人。</textarea>
+    <button id="connect">连接</button>
+    <button id="speak">朗读</button>
+    <span id="status">未连接</span>
+  </section>
+
+  <script src="control.js"></script>
+</body>
+</html>

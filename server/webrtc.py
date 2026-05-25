@@ -187,6 +187,31 @@ class HumanPlayer:
         if hasattr(self.__container, 'output'):
             self.__container.output._player = self
 
+    def start(self) -> None:
+        """Start the avatar render worker proactively."""
+        if self.__thread is None:
+            self.__log_debug("Starting worker thread")
+            self.__thread_quit = threading.Event()
+            self.__thread = threading.Thread(
+                name="media-player",
+                target=player_worker_thread,
+                args=(
+                    self.__thread_quit,
+                    self.__container
+                ),
+            )
+            self.__thread.start()
+
+    def stop_worker(self) -> None:
+        """Stop the avatar render worker if it was started proactively."""
+        if self.__thread is not None and self.__thread_quit is not None:
+            self.__log_debug("Stopping worker thread")
+            self.__thread_quit.set()
+            self.__thread.join(timeout=3)
+            self.__thread = None
+            self.__thread_quit = None
+        self.__container = None
+
     def push_video(self, frame):
         from av import VideoFrame
         new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
@@ -222,27 +247,13 @@ class HumanPlayer:
 
     def _start(self, track: PlayerStreamTrack) -> None:
         self.__started.add(track)
-        if self.__thread is None:
-            self.__log_debug("Starting worker thread")
-            self.__thread_quit = threading.Event()
-            self.__thread = threading.Thread(
-                name="media-player",
-                target=player_worker_thread,
-                args=(
-                    self.__thread_quit,
-                    self.__container
-                ),
-            )
-            self.__thread.start()
+        self.start()
 
     def _stop(self, track: PlayerStreamTrack) -> None:
         self.__started.discard(track)
 
         if not self.__started and self.__thread is not None:
-            self.__log_debug("Stopping worker thread")
-            self.__thread_quit.set()
-            self.__thread.join()
-            self.__thread = None
+            self.stop_worker()
 
         if not self.__started and self.__container is not None:
             #self.__container.close()

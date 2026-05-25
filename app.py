@@ -42,6 +42,7 @@ import registry
 from server.routes import setup_routes
 from server.rtc_manager import RTCManager
 from server.session_manager import session_manager
+from server.alpha_stream import alpha_audio_hub, alpha_frame_hub
 
 import argparse
 import random
@@ -197,6 +198,8 @@ def main():
     def run_server(runner):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        alpha_frame_hub.set_loop(loop)
+        alpha_audio_hub.set_loop(loop)
         loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, '0.0.0.0', opt.listenport)
         loop.run_until_complete(site.start())

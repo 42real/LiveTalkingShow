@@ -3,6 +3,7 @@
 ###############################################################################
 
 import asyncio
+import threading
 import uuid
 from typing import Dict, Optional
 from utils.logger import logger
@@ -29,6 +30,8 @@ class SessionManager:
         if not hasattr(self, "initialized"):
             self.sessions: Dict[str, BaseAvatar] = {}
             self.build_session_fn = None
+            self.default_alpha_sessionid: Optional[str] = None
+            self._alpha_lock = asyncio.Lock()
             self.initialized = True
 
     def init_builder(self, build_session_fn):
@@ -73,8 +76,59 @@ class SessionManager:
         """销毁会话资源"""
         if sessionid in self.sessions:
             logger.info(f"Removing session {sessionid}")
-            # todo: 还可以主动调 avatar_session 释放
+            avatar_session = self.sessions.get(sessionid)
+            try:
+                render_quit = getattr(avatar_session, "_alpha_render_quit", None)
+                render_thread = getattr(avatar_session, "_alpha_render_thread", None)
+                if render_quit is not None:
+                    render_quit.set()
+                if render_thread is not None and render_thread.is_alive():
+                    render_thread.join(timeout=3)
+                player = getattr(getattr(avatar_session, "output", None), "_player", None)
+                if player is not None and hasattr(player, "stop_worker"):
+                    player.stop_worker()
+            except Exception:
+                logger.exception("failed to stop session worker: %s", sessionid)
             self.sessions.pop(sessionid, None)
+            if self.default_alpha_sessionid == sessionid:
+                self.default_alpha_sessionid = None
+
+    async def create_alpha_session(self, params: dict, sessionid: str = None) -> str:
+        """Create a session and run avatar rendering without a WebRTC PeerConnection."""
+        if sessionid is not None and self.has_session(sessionid):
+            return sessionid
+        sessionid = await self.create_session(params, sessionid)
+        avatar_session = self.sessions[sessionid]
+        quit_event = threading.Event()
+        render_thread = threading.Thread(
+            name=f"alpha-render-{sessionid}",
+            target=avatar_session.render,
+            args=(quit_event,),
+            daemon=True,
+        )
+        avatar_session._alpha_render_quit = quit_event
+        avatar_session._alpha_render_thread = render_thread
+        render_thread.start()
+        return sessionid
+
+    async def get_or_create_alpha_session(self, params: dict = None, sessionid: str = None) -> str:
+        """Return an existing alpha session or create one for API-driven desktop display."""
+        params = params or {}
+        requested_sessionid = str(sessionid or params.get("sessionid") or "").strip()
+
+        async with self._alpha_lock:
+            if requested_sessionid and self.has_session(requested_sessionid):
+                self.default_alpha_sessionid = requested_sessionid
+                return requested_sessionid
+
+            if not requested_sessionid and self.default_alpha_sessionid:
+                if self.has_session(self.default_alpha_sessionid):
+                    return self.default_alpha_sessionid
+                self.default_alpha_sessionid = None
+
+            created_sessionid = await self.create_alpha_session(params, requested_sessionid or None)
+            self.default_alpha_sessionid = created_sessionid
+            return created_sessionid
 
 # 单例抛出
 session_manager = SessionManager()

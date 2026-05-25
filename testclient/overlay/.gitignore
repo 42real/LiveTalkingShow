@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+snapshots/
+test-alpha-*.pcm
+test-alpha-*.png
+dist/
+build/

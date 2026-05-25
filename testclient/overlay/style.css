@@ -1,0 +1,151 @@
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  -webkit-app-region: no-drag;
+}
+
+body.viewer #chrome {
+  display: none;
+}
+
+body.manage #stage {
+  -webkit-app-region: drag;
+  pointer-events: auto;
+}
+
+body.controlbar {
+  display: block;
+  pointer-events: auto;
+}
+
+body.controlbar #stage,
+body.controlbar #avatar,
+body.controlbar #chrome {
+  display: none;
+}
+
+body.controlbar #toolbar {
+  position: absolute;
+  inset: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(255,255,255,.72);
+  backdrop-filter: blur(8px);
+  border-radius: 8px;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  z-index: 100;
+}
+
+#stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+#avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  user-select: none;
+  image-rendering: auto;
+  pointer-events: none;
+}
+
+#chrome {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 10;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+button, input, textarea {
+  border: 1px solid rgba(0,0,0,.25);
+  background: rgba(255,255,255,.86);
+  border-radius: 6px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  line-height: 26px;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  user-select: none;
+  cursor: pointer;
+}
+
+#drag {
+  -webkit-app-region: drag;
+  cursor: move;
+}
+
+#zoomControls {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+#zoomReset {
+  min-width: 48px;
+}
+
+#panel {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 11;
+  display: grid;
+  grid-template-columns: 1fr 86px auto auto;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255,255,255,.72);
+  backdrop-filter: blur(8px);
+}
+
+#server {
+  grid-column: 1 / 2;
+}
+
+#sessionid {
+  grid-column: 2 / 3;
+}
+
+#text {
+  grid-column: 1 / 3;
+  resize: vertical;
+  min-height: 42px;
+}
+
+#speak {
+  grid-column: 4 / 5;
+  grid-row: 1 / 3;
+}
+
+#connect {
+  grid-column: 3 / 4;
+  grid-row: 1 / 3;
+}
+
+#status {
+  grid-column: 1 / 5;
+  font-size: 12px;
+}

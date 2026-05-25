@@ -48,6 +48,7 @@ from registry import register
 
 device = initialize_device()
 logger.info('Using {} for inference.'.format(device))
+WAV2LIP_FACE_SIZE = 256
 
 def _load(checkpoint_path):
     if device == 'cuda':
@@ -108,6 +109,7 @@ class LipReal(BaseAvatar):
         # self.idx = 0
         # self.res_frame_queue = Queue(self.batch_size*2)
         self.model = model
+        self.face_input_size = WAV2LIP_FACE_SIZE
 
         self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle = avatar
 
@@ -122,11 +124,15 @@ class LipReal(BaseAvatar):
         for i in range(self.batch_size):
             idx = mirror_index(length, index + i)
             face = self.face_list_cycle[idx]
+            if face.ndim == 3 and face.shape[2] == 4:
+                face = cv2.cvtColor(face, cv2.COLOR_BGRA2BGR)
+            if face.shape[:2] != (self.face_input_size, self.face_input_size):
+                face = cv2.resize(face, (self.face_input_size, self.face_input_size))
             img_batch.append(face)
         img_batch, audiofeat_batch = np.asarray(img_batch), np.asarray(audiofeat_batch)
 
         img_masked = img_batch.copy()
-        img_masked[:, face.shape[0]//2:] = 0
+        img_masked[:, self.face_input_size//2:] = 0
 
         img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
         audiofeat_batch = np.reshape(audiofeat_batch, [len(audiofeat_batch), audiofeat_batch.shape[1], audiofeat_batch.shape[2], 1])
@@ -144,6 +150,8 @@ class LipReal(BaseAvatar):
         combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
         y1, y2, x1, x2 = bbox
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
-        combine_frame[y1:y2, x1:x2] = res_frame
+        if combine_frame.ndim == 3 and combine_frame.shape[2] == 4:
+            combine_frame[y1:y2, x1:x2, :3] = res_frame
+        else:
+            combine_frame[y1:y2, x1:x2] = res_frame
         return combine_frame
-

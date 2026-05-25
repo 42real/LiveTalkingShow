@@ -12,11 +12,13 @@ from avatars.wav2lip import face_detection
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('Using {} for inference.'.format(device))
 
+
 def osmakedirs(path_list):
     for path in path_list:
         os.makedirs(path) if not os.path.exists(path) else None
 
-def video2imgs(vid_path, save_path, ext = '.png',cut_frame = 10000000):
+
+def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000):
     cap = cv2.VideoCapture(vid_path)
     count = 0
     while True:
@@ -24,35 +26,74 @@ def video2imgs(vid_path, save_path, ext = '.png',cut_frame = 10000000):
             break
         ret, frame = cap.read()
         if ret:
-            cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
+            cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128, 128, 128), 1)
             cv2.imwrite(f"{save_path}/{count:08d}.png", frame)
             count += 1
         else:
             break
 
+
+def input2imgs(input_path, save_path):
+    image_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
+    video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
+    if os.path.isdir(input_path):
+        img_list = sorted([
+            p for p in glob(os.path.join(input_path, '*'))
+            if os.path.splitext(p)[1].lower() in image_exts
+        ])
+        for idx, img_path in enumerate(img_list):
+            img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                continue
+            cv2.imwrite(f"{save_path}/{idx:08d}.png", img)
+        return
+
+    ext = os.path.splitext(input_path)[1].lower()
+    if ext in image_exts:
+        img = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(f"Cannot read image: {input_path}")
+        cv2.imwrite(f"{save_path}/00000000.png", img)
+        return
+
+    if ext in video_exts:
+        video2imgs(input_path, save_path, ext='png')
+        return
+
+    raise ValueError(f"Unsupported input file: {input_path}")
+
+
 def read_imgs(img_list):
     frames = []
     print('reading images...')
     for img_path in tqdm(img_list):
-        frame = cv2.imread(img_path)
+        frame = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
         frames.append(frame)
     return frames
 
+
 def get_smoothened_boxes(boxes, T):
-	for i in range(len(boxes)):
-		if i + T > len(boxes):
-			window = boxes[len(boxes) - T:]
-		else:
-			window = boxes[i : i + T]
-		boxes[i] = np.mean(window, axis=0)
-	return boxes
+    for i in range(len(boxes)):
+        if i + T > len(boxes):
+            window = boxes[len(boxes) - T:]
+        else:
+            window = boxes[i: i + T]
+        boxes[i] = np.mean(window, axis=0)
+    return boxes
+
+
+def _frame_for_detection(frame):
+    if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
+        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    return frame
+
 
 def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=96, pads=[0, 10, 0, 0], nosmooth=False, face_det_batch_size=16, progress_callback=None):
     """
     生成avatar的核心逻辑
 
     Args:
-        video_path: 输入视频路径
+        video_path: 输入视频、图片或图片目录路径
         avatar_id: Avatar ID
         save_path: 保存根路径
         img_size: 缩放后的图像大小
@@ -68,17 +109,21 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
 
     osmakedirs([avatar_path, full_imgs_path, face_imgs_path])
 
-    if progress_callback: progress_callback(5)
+    if progress_callback:
+        progress_callback(5)
 
-    print(f"正在处理视频: {video_path}")
-    video2imgs(video_path, full_imgs_path, ext='png')
+    print(f"正在处理输入: {video_path}")
+    input2imgs(video_path, full_imgs_path)
 
-    if progress_callback: progress_callback(20)
+    if progress_callback:
+        progress_callback(20)
 
     input_img_list = sorted(glob(os.path.join(full_imgs_path, '*.[jpJP][pnPN]*[gG]')))
     frames = read_imgs(input_img_list)
+    detect_frames = [_frame_for_detection(frame) for frame in frames]
 
-    if progress_callback: progress_callback(40)
+    if progress_callback:
+        progress_callback(40)
 
     print('正在检测人脸...')
     detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D,
@@ -90,10 +135,10 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
     while 1:
         predictions = []
         try:
-            for i in range(0, len(frames), batch_size):
-                predictions.extend(detector.get_detections_for_batch(np.array(frames[i:i + batch_size])))
+            for i in range(0, len(detect_frames), batch_size):
+                predictions.extend(detector.get_detections_for_batch(np.array(detect_frames[i:i + batch_size])))
                 if progress_callback:
-                    progress = 40 + int((i + batch_size) / len(frames) * 40)
+                    progress = 40 + int((i + batch_size) / len(detect_frames) * 40)
                     progress_callback(min(progress, 80))
         except RuntimeError:
             if batch_size == 1:
@@ -105,7 +150,7 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
 
     results = []
     pady1, pady2, padx1, padx2 = pads
-    for rect, image in zip(predictions, frames):
+    for rect, image in zip(predictions, detect_frames):
         if rect is None:
             rect = [0, 0, image.shape[1], image.shape[0]]
 
@@ -119,7 +164,8 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
     if not nosmooth:
         boxes = get_smoothened_boxes(boxes, T=5)
 
-    if progress_callback: progress_callback(85)
+    if progress_callback:
+        progress_callback(85)
 
     coord_list = []
     print(f"正在保存人脸图片和坐标...")
@@ -138,8 +184,10 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
         pickle.dump(coord_list, f)
 
     del detector
-    if progress_callback: progress_callback(100)
+    if progress_callback:
+        progress_callback(100)
     print("Avatar 生成完成！")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')

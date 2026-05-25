@@ -1,21 +1,75 @@
+# Python / build cache
 __pycache__/
-build/
+*.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
 *.so
-*.mp4
+node_modules/
 
+# Local environments and editor files
+.venv/
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime logs and temporary media
+*.log
+*.out
+*.err
+nohup.out
+*.pid
+log/
+logs/
+tmp*/
 tmp*
 trial*/
+temp*.aac
+temp*.mp4
+temp*.wav
+*.aac
 
-data
+# Generated recordings and test artifacts
+data/record.mp4
+test_artifacts/
+
+# Downloaded model files and local caches
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.bin
+*.gguf
+.cache/
+hub/
+checkpoints/
+weights/
+pretrained_models/
+
+# Downloaded models and generated avatar assets
+data/*
+!data/custom_config.json
+!data/avatars/
+data/avatars/*
+!data/avatars/.gitkeep
+models/*
+!models/put models here.txt
+hf_assets/
+downloads/
+pretrained/
+
+# Large upstream assets
 data_utils/face_tracking/3DMM/*
 data_utils/face_parsing/79999_iter.pth
-
-pretrained
-*.mp4
-.DS_Store
 workspace/log_ngp.txt
-.idea
-models/
-*.log
-dist
+
+# Local one-off assets used during experiments
+designtool_site_01.png

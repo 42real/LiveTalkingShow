@@ -43,12 +43,18 @@ def parse_args():
                         help="custom action json")
 
     # ─── TTS ───────────────────────────────────────────────────────────
-    parser.add_argument('--tts', type=str, default='edgetts',
-                        help="tts plugin: edgetts/gpt-sovits/cosyvoice/fishtts/tencent/doubao/indextts2/azuretts/qwentts")
+    parser.add_argument('--tts', type=str, default=os.getenv('LIVETALKING_TTS', 'robottts'),
+                        help="tts plugin: robottts/gpt-sovits/cosyvoice/fishtts/tencent/doubao/indextts2/azuretts/qwentts/edgetts")
     parser.add_argument('--REF_FILE', type=str, default="zh-CN-YunxiaNeural",
                         help="参考文件名或语音模型ID")
     parser.add_argument('--REF_TEXT', type=str, default=None)
-    parser.add_argument('--TTS_SERVER', type=str, default='http://127.0.0.1:9880')
+    parser.add_argument('--TTS_SERVER', type=str, default=os.getenv('TTS_SERVER_URL', 'http://127.0.0.1:8036'))
+    parser.add_argument('--robottts_mode', type=str, default='instruct2',
+                        help="robottts mode: instruct2/zero-shot")
+    parser.add_argument('--robottts_connect_timeout', type=float, default=10.0,
+                        help="robottts websocket/http connect timeout")
+    parser.add_argument('--robottts_receive_timeout', type=float, default=1.0,
+                        help="robottts websocket receive timeout")
 
     # ─── 传输 ─────────────────────────────────────────────────────────
     parser.add_argument('--transport', type=str, default='webrtc',
@@ -58,6 +64,8 @@ def parse_args():
     parser.add_argument('--max_session', type=int, default=1)
     parser.add_argument('--listenport', type=int, default=8010,
                         help="web listen port")
+    parser.add_argument('--alpha_output', action='store_true',
+                        help="enable transparent PNG frame websocket at /alpha/ws")
 
     opt = parser.parse_args()
 
