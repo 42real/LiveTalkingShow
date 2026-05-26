@@ -34,13 +34,21 @@ class MelASR(BaseASR):
     def run_step(self):
         ############################################## extract audio feature ##############################################
         # get a frame of audio
+        is_all_silence = True
         for _ in range(self.batch_size*2):
             audioframe = self.get_audio_frame()
+            if audioframe.type == 0:
+                is_all_silence = False
             self.frames.append(audioframe.data)
             # put to output
             self.output_queue.put(audioframe)
         # context not enough, do not run network.
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
+            return
+
+        if is_all_silence:
+            self.feat_queue.put(self.batch_size * [np.zeros((80, 16), dtype=np.float32)])
+            self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]
             return
         
         inputs = np.concatenate(self.frames) # [N * chunk]

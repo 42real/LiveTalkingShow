@@ -1,6 +1,6 @@
 # LiveTalking Test Overlay
 
-这个目录是 `testclient` 的桌面显示窗口，只负责透明、无边框、置顶显示 LiveTalking 的 alpha 视频。文字输入、TTS provider 和音频推送由 `testclient/backend`、真实 `robot-tts` 或其他外部组件完成。
+这个目录是 `testclient` 的桌面显示窗口，只负责透明、无边框、置顶显示 LiveTalking 的 alpha stream 视频。文字输入、TTS provider 和音频推送由 `testclient/backend`、真实 `robot-tts` 或其他外部组件完成。
 
 ## 链路
 
@@ -51,6 +51,8 @@ LIVETALKING_SERVER=http://<LiveTalking服务器IP>:8050 ./start.sh
 
 overlay 从 `/alpha/ws` 的帧头读取原始 `width/height`。这个尺寸来自当前 avatar 的 `full_imgs` 原图尺寸；overlay 只按比例缩放显示，不裁剪、不压缩原始画布。
 
+默认会按 `LIVETALKING_VIDEO_MAX_HEIGHT=1080`、`LIVETALKING_VIDEO_FPS=15` 请求 alpha stream，以降低 raw RGBA 传输压力。要拉取原始无损尺寸时，把这两个值设为 `0`。
+
 如果画面尺寸不对，优先检查：
 
 - 当前 LiveTalking 启动的 `--avatar_id` 是否正确。
@@ -75,12 +77,17 @@ LIVETALKING_SCALE=1
 LIVETALKING_RENDERER=webgl
 LIVETALKING_CONTROL_WIDTH=340
 LIVETALKING_CONTROL_HEIGHT=38
+LIVETALKING_VIDEO_MAX_WIDTH=0
+LIVETALKING_VIDEO_MAX_HEIGHT=1080
+LIVETALKING_VIDEO_FPS=15
 LIVETALKING_X=1200
 LIVETALKING_Y=200
 LIVETALKING_EXTRA_PATH=/optional/bin/path
 ```
 
 建议保持 `LIVETALKING_PLAY_AUDIO=0`。桌面窗口只显示视频，音频由 TTS 服务或主控组件播放，可以避免重复声音。
+
+`LIVETALKING_VIDEO_MAX_WIDTH`、`LIVETALKING_VIDEO_MAX_HEIGHT` 和 `LIVETALKING_VIDEO_FPS` 只影响 overlay 从 `/alpha/ws` 请求的传输尺寸和帧率，不会修改 avatar 文件。高分辨率 avatar 建议先用 `LIVETALKING_VIDEO_MAX_HEIGHT=1080`、`LIVETALKING_VIDEO_FPS=15`，仍卡再降到 `720/12`。
 
 ## 调试
 

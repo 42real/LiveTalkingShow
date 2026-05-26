@@ -24,6 +24,9 @@ let movingViewerFromControl = false;
 const playAudio = process.env.LIVETALKING_PLAY_AUDIO === '1';
 const autoSession = process.env.LIVETALKING_AUTO_SESSION !== '0';
 const closeSessionOnExit = process.env.LIVETALKING_CLOSE_SESSION_ON_EXIT !== '0';
+const videoMaxWidth = envInt('LIVETALKING_VIDEO_MAX_WIDTH', 0);
+const videoMaxHeight = envInt('LIVETALKING_VIDEO_MAX_HEIGHT', 0);
+const videoFps = envFloat('LIVETALKING_VIDEO_FPS', 0);
 const logFile = path.join(__dirname, 'overlay-debug.log');
 
 function debugLog(scope, message, data) {
@@ -89,7 +92,10 @@ function createViewerWindow() {
     clickThrough,
     playAudio,
     autoSession,
-    closeSessionOnExit
+    closeSessionOnExit,
+    videoMaxWidth,
+    videoMaxHeight,
+    videoFps
   });
 
   viewerWindow = new BrowserWindow({
@@ -127,7 +133,10 @@ function createViewerWindow() {
     autoSession: autoSession ? '1' : '0',
     closeSessionOnExit: closeSessionOnExit ? '1' : '0',
     scale: String(envFloat('LIVETALKING_SCALE', 1)),
-    renderer: process.env.LIVETALKING_RENDERER || 'webgl'
+    renderer: process.env.LIVETALKING_RENDERER || 'webgl',
+    videoMaxWidth: String(videoMaxWidth),
+    videoMaxHeight: String(videoMaxHeight),
+    videoFps: String(videoFps)
   });
   viewerWindow.loadFile('viewer.html', { search: `?${params.toString()}` });
 

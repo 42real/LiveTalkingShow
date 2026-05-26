@@ -1,25 +1,33 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Cable, Mic, Play, RotateCcw, Send, Square, Video } from 'lucide-react';
+import { Activity, Cable, Mic, Play, RotateCcw, Send, Square, Video, Volume2, VolumeX } from 'lucide-react';
 import './styles.css';
-
-const DEFAULTS = {
-  liveTalkingUrl: import.meta.env.VITE_LIVETALKING_URL || 'http://127.0.0.1:8050',
-  ttsServerUrl: import.meta.env.VITE_TTS_SERVER_URL || 'http://127.0.0.1:8036',
-  alphaInputWs: import.meta.env.VITE_ALPHA_INPUT_WS || 'ws://127.0.0.1:8050/alpha/input/audio',
-  text: import.meta.env.VITE_DEFAULT_TEXT || '这是一段 robottts 兼容接口流式测试。',
-  prompts: import.meta.env.VITE_DEFAULT_PROMPTS || '请自然清晰地朗读。',
-  voiceId: Number.parseInt(import.meta.env.VITE_DEFAULT_VOICE_ID || '0', 10),
-  mode: import.meta.env.VITE_DEFAULT_MODE || 'instruct2'
-};
 
 function wsUrl(base, path) {
   const url = new URL(base);
+  const target = new URL(path, url.origin);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.pathname = path;
-  url.search = '';
+  url.pathname = target.pathname;
+  url.search = target.search;
   return url.toString();
 }
+
+const DEFAULT_LIVETALKING_URL = import.meta.env.VITE_LIVETALKING_URL || 'http://127.0.0.1:8050';
+
+const DEFAULTS = {
+  liveTalkingUrl: DEFAULT_LIVETALKING_URL,
+  ttsServerUrl: import.meta.env.VITE_TTS_SERVER_URL || 'http://127.0.0.1:8036',
+  alphaInputWs: import.meta.env.VITE_ALPHA_INPUT_WS || wsUrl(DEFAULT_LIVETALKING_URL, '/alpha/input/audio'),
+  text: import.meta.env.VITE_DEFAULT_TEXT || '这是一段 robottts 兼容接口流式测试。',
+  prompts: import.meta.env.VITE_DEFAULT_PROMPTS || '请自然清晰地朗读。',
+  voiceId: Number.parseInt(import.meta.env.VITE_DEFAULT_VOICE_ID || '0', 10),
+  mode: import.meta.env.VITE_DEFAULT_MODE || 'instruct2',
+  audioSampleRate: Number.parseInt(import.meta.env.VITE_ALPHA_AUDIO_SAMPLE_RATE || '16000', 10),
+  videoMaxHeight: Number.parseInt(import.meta.env.VITE_ALPHA_VIDEO_MAX_HEIGHT || '720', 10),
+  videoPreviewFps: Number.parseFloat(import.meta.env.VITE_ALPHA_VIDEO_FPS || '8'),
+  videoRenderIntervalMs: Math.max(33, Number.parseInt(import.meta.env.VITE_VIDEO_RENDER_INTERVAL_MS || '125', 10)),
+  alphaAutoConnect: (import.meta.env.VITE_ALPHA_AUTO_CONNECT || '1') !== '0'
+};
 
 function parseFrame(packet) {
   if (!packet || packet.byteLength < 24) return null;
@@ -49,13 +57,21 @@ function App() {
   const [sessionId, setSessionId] = useState('');
   const [status, setStatus] = useState('idle');
   const [videoState, setVideoState] = useState('disconnected');
+  const [audioState, setAudioState] = useState('disconnected');
   const [frameInfo, setFrameInfo] = useState({ width: 0, height: 0, seq: 0, fps: 0 });
+  const [audioInfo, setAudioInfo] = useState({ chunks: 0, bytes: 0 });
   const [logs, setLogs] = useState([]);
   const canvasRef = useRef(null);
   const socketRef = useRef(null);
+  const audioSocketRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const audioScheduleRef = useRef(0);
   const latestFramePacketRef = useRef(null);
-  const renderFrameRef = useRef(0);
+  const renderTimerRef = useRef(0);
+  const lastVideoDrawAtRef = useRef(0);
+  const alphaAutoStartedRef = useRef(false);
   const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0, fps: 0 });
+  const audioStatsRef = useRef({ chunks: 0, bytes: 0, lastUpdateAt: 0 });
 
   const addLog = useCallback((message, data) => {
     const time = new Date().toLocaleTimeString();
@@ -69,7 +85,8 @@ function App() {
     return {
       live,
       tts,
-      alphaWs: wsUrl(live, '/alpha/ws')
+      alphaWs: wsUrl(live, `/alpha/ws?max_height=${DEFAULTS.videoMaxHeight}&fps=${DEFAULTS.videoPreviewFps}`),
+      audioWs: wsUrl(live, '/alpha/audio')
     };
   }, [liveTalkingUrl, ttsServerUrl]);
 
@@ -102,20 +119,21 @@ function App() {
   }, [addLog]);
 
   const renderLatestFrame = useCallback(() => {
-    renderFrameRef.current = 0;
+    renderTimerRef.current = 0;
     const packet = latestFramePacketRef.current;
     latestFramePacketRef.current = null;
-    if (packet) drawFrame(packet);
-    if (latestFramePacketRef.current && !renderFrameRef.current) {
-      renderFrameRef.current = requestAnimationFrame(renderLatestFrame);
+    if (packet) {
+      drawFrame(packet);
+      lastVideoDrawAtRef.current = performance.now();
     }
   }, [drawFrame]);
 
   const enqueueVideoFrame = useCallback((packet) => {
     latestFramePacketRef.current = packet;
-    if (!renderFrameRef.current) {
-      renderFrameRef.current = requestAnimationFrame(renderLatestFrame);
-    }
+    if (renderTimerRef.current) return;
+    const elapsed = performance.now() - lastVideoDrawAtRef.current;
+    const wait = Math.max(0, DEFAULTS.videoRenderIntervalMs - elapsed);
+    renderTimerRef.current = window.setTimeout(renderLatestFrame, wait);
   }, [renderLatestFrame]);
 
   const connectVideo = useCallback(() => {
@@ -138,20 +156,105 @@ function App() {
       setVideoState('disconnected');
       addLog('alpha 视频流已断开', { code: event.code });
     };
-  }, [addLog, drawFrame, normalized.alphaWs]);
+  }, [addLog, enqueueVideoFrame, normalized.alphaWs]);
 
   const disconnectVideo = useCallback(() => {
     socketRef.current?.close();
     socketRef.current = null;
     latestFramePacketRef.current = null;
-    if (renderFrameRef.current) {
-      cancelAnimationFrame(renderFrameRef.current);
-      renderFrameRef.current = 0;
+    if (renderTimerRef.current) {
+      clearTimeout(renderTimerRef.current);
+      renderTimerRef.current = 0;
     }
     setVideoState('disconnected');
   }, []);
 
-  useEffect(() => () => disconnectVideo(), [disconnectVideo]);
+  const playAudioChunk = useCallback((packet) => {
+    const audioContext = audioContextRef.current;
+    if (!audioContext || !(packet instanceof ArrayBuffer) || packet.byteLength < 2) return;
+
+    const samples = new Int16Array(packet);
+    const buffer = audioContext.createBuffer(1, samples.length, DEFAULTS.audioSampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let index = 0; index < samples.length; index += 1) {
+      channel[index] = Math.max(-1, Math.min(1, samples[index] / 32768));
+    }
+
+    const now = audioContext.currentTime;
+    if (
+      !audioScheduleRef.current ||
+      audioScheduleRef.current < now + 0.03 ||
+      audioScheduleRef.current > now + 0.8
+    ) {
+      audioScheduleRef.current = now + 0.05;
+    }
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.start(audioScheduleRef.current);
+    audioScheduleRef.current += buffer.duration;
+
+    const stats = audioStatsRef.current;
+    stats.chunks += 1;
+    stats.bytes += packet.byteLength;
+    const updateAt = performance.now();
+    if (updateAt - stats.lastUpdateAt >= 500) {
+      stats.lastUpdateAt = updateAt;
+      setAudioInfo({ chunks: stats.chunks, bytes: stats.bytes });
+    }
+  }, []);
+
+  const disconnectAudio = useCallback(() => {
+    audioSocketRef.current?.close();
+    audioSocketRef.current = null;
+    audioScheduleRef.current = 0;
+    audioStatsRef.current = { chunks: 0, bytes: 0, lastUpdateAt: 0 };
+    setAudioState('disconnected');
+    setAudioInfo({ chunks: 0, bytes: 0 });
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+  }, []);
+
+  const connectAudio = useCallback(async () => {
+    disconnectAudio();
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      setAudioState('error');
+      addLog('浏览器不支持 Web Audio');
+      return;
+    }
+
+    const audioContext = new AudioContextClass();
+    audioContextRef.current = audioContext;
+    await audioContext.resume();
+
+    const socket = new WebSocket(normalized.audioWs);
+    socket.binaryType = 'arraybuffer';
+    audioSocketRef.current = socket;
+    setAudioState('connecting');
+    addLog('连接 alpha 音频流', { url: normalized.audioWs, sampleRate: DEFAULTS.audioSampleRate });
+    socket.onopen = () => {
+      setAudioState('connected');
+      addLog('alpha 音频流已连接');
+    };
+    socket.onmessage = (event) => playAudioChunk(event.data);
+    socket.onerror = () => {
+      setAudioState('error');
+      addLog('alpha 音频流连接错误');
+    };
+    socket.onclose = (event) => {
+      setAudioState('disconnected');
+      addLog('alpha 音频流已断开', { code: event.code });
+    };
+  }, [addLog, disconnectAudio, normalized.audioWs, playAudioChunk]);
+
+  useEffect(() => () => {
+    disconnectVideo();
+    disconnectAudio();
+  }, [disconnectAudio, disconnectVideo]);
 
   const checkHealth = async () => {
     setStatus('checking');
@@ -193,6 +296,13 @@ function App() {
       addLog('创建 alpha session 失败', { error: String(error) });
     }
   };
+
+  useEffect(() => {
+    if (!DEFAULTS.alphaAutoConnect || alphaAutoStartedRef.current) return;
+    alphaAutoStartedRef.current = true;
+    createSession();
+    connectVideo();
+  }, [connectVideo]);
 
   const speakViaLiveTalking = async () => {
     setStatus('speaking');
@@ -317,6 +427,8 @@ function App() {
             <button onClick={createSession}><RotateCcw size={16} />Session</button>
             <button onClick={connectVideo}><Video size={16} />视频</button>
             <button onClick={disconnectVideo}><Square size={16} />断开</button>
+            <button onClick={connectAudio}><Volume2 size={16} />音频</button>
+            <button onClick={disconnectAudio}><VolumeX size={16} />静音</button>
             <button onClick={speakViaLiveTalking}><Send size={16} />alpha/speak</button>
             <button onClick={pushViaTask}><Mic size={16} />TTS task</button>
             <button onClick={interrupt}><Square size={16} />打断</button>
@@ -336,7 +448,10 @@ function App() {
         <div className="panel logs">
           <div className="title">
             <Play size={18} />
-            <span>Status: {status} {sessionId ? `| session ${sessionId}` : ''}</span>
+            <span>
+              Status: {status} {sessionId ? `| session ${sessionId}` : ''}
+              {' '}| audio {audioState} {audioInfo.chunks ? `| ${audioInfo.chunks} chunks` : ''}
+            </span>
           </div>
           <pre>{logs.join('\n')}</pre>
         </div>

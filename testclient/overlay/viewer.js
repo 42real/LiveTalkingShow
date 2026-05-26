@@ -8,6 +8,9 @@ let playAudio = urlParams.get('playAudio') === '1';
 let autoSession = urlParams.get('autoSession') !== '0';
 let closeSessionOnExit = urlParams.get('closeSessionOnExit') === '1';
 let zoomScale = clampScale(readPositiveFloatParam('scale', 1));
+let videoMaxWidth = readNonNegativeIntParam('videoMaxWidth', 0);
+let videoMaxHeight = readNonNegativeIntParam('videoMaxHeight', 0);
+let videoFps = readPositiveFloatParam('videoFps', 0);
 
 let socket = null;
 let audioSocket = null;
@@ -50,6 +53,11 @@ function readPositiveFloatParam(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function readNonNegativeIntParam(name, fallback) {
+  const value = Number.parseInt(urlParams.get(name) || '', 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 function clampScale(value) {
   if (!Number.isFinite(value)) return 1;
   return Math.min(3, Math.max(0.25, value));
@@ -58,8 +66,19 @@ function clampScale(value) {
 function wsUrl(server, path) {
   const url = new URL(server);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.pathname = path;
+  const [pathname, search = ''] = path.split('?');
+  url.pathname = pathname;
+  url.search = search;
   return url.toString();
+}
+
+function alphaVideoPath() {
+  const params = new URLSearchParams();
+  if (videoMaxWidth > 0) params.set('max_width', String(videoMaxWidth));
+  if (videoMaxHeight > 0) params.set('max_height', String(videoMaxHeight));
+  if (videoFps > 0) params.set('fps', String(videoFps));
+  const query = params.toString();
+  return query ? `/alpha/ws?${query}` : '/alpha/ws';
 }
 
 function connect() {
@@ -69,8 +88,9 @@ function connect() {
     socket.close();
   }
 
-  log('connect video websocket', { serverBase, url: wsUrl(serverBase, '/alpha/ws') });
-  socket = new WebSocket(wsUrl(serverBase, '/alpha/ws'));
+  const videoPath = alphaVideoPath();
+  log('connect video websocket', { serverBase, url: wsUrl(serverBase, videoPath), videoMaxWidth, videoMaxHeight, videoFps });
+  socket = new WebSocket(wsUrl(serverBase, videoPath));
   socket.binaryType = 'arraybuffer';
   socket.onopen = () => {
     log('video websocket open');

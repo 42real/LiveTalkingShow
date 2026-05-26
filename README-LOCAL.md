@@ -1,6 +1,8 @@
 # LiveTalking 本地交接说明
 
-这份文档说明当前仓库里的本地改造、运行方式、可调参数和迁移边界。命令默认从仓库根目录执行。
+这份文档说明当前仓库里的本地改造、运行方式、可调参数、服务协议和迁移边界。命令默认从仓库根目录执行。
+
+本地交接以这份文档为准：当前部署规范使用 `uv`，不使用 conda。上游 `README.md` 里的 conda 安装命令只作为官方历史说明，不作为本地运行方式。
 
 克隆后先跑最小闭环：
 
@@ -29,9 +31,98 @@ ENV > .env > config.yaml
 LIVETALKING_PORT=8051 AVATAR_ID=my_avatar ./entrypoint.sh
 ```
 
-常用 `.env` 键：`TTS_SERVER_URL`、`LIVETALKING_PORT`、`LIVETALKING_URL`、`LIVETALKING_WS_URL`、`AVATAR_ID`。
+配置文件分工：
+
+| 文件 | 谁读取 | 用途 | 是否提交 |
+| --- | --- | --- | --- |
+| `config.yaml` | LiveTalking 主服务 | 默认部署配置，适合写团队共享默认值。 | 提交。 |
+| `.env.example` | 人看，复制成 `.env` | LiveTalking 主服务的环境变量模板。 | 提交。 |
+| `.env` | LiveTalking 主服务 | 当前机器的真实配置，优先级高于 `config.yaml`。 | 不提交。 |
+| `testclient/.env.example` | 人看，复制成 `testclient/.env` | 测试 TTS、Web、overlay 的统一模板。 | 提交。 |
+| `testclient/.env` | `testclient/start-*.sh` | 当前机器的测试客户端配置。 | 不提交。 |
+
+LiveTalking 主服务最常用配置：
+
+| 变量 | config.yaml 路径 | 默认 | 谁使用 | 说明 |
+| --- | --- | --- | --- | --- |
+| `HF_ENDPOINT` | `runtime.hf_endpoint` | `https://hf-mirror.com` | 下载脚本、运行时依赖下载 | Hugging Face 镜像。能直连官方时可不设；国内网络建议保留。 |
+| `LIVETALKING_HOST` | `server.host` | `0.0.0.0` | LiveTalking | 服务监听地址。部署给其他机器访问时保持 `0.0.0.0`。 |
+| `LIVETALKING_PORT` | `server.port` | `8050` | LiveTalking | HTTP/WebSocket 端口。改它后，所有客户端里的 LiveTalking URL 都要同步。 |
+| `LIVETALKING_MODEL` | `avatar.model` | `wav2lip` | LiveTalking | avatar 推理模型：`wav2lip` / `musetalk` / `ultralight`。当前交接主链路用 `wav2lip`。 |
+| `AVATAR_ID` | `avatar.avatar_id` | `wav2lip_avatar_female_model` | LiveTalking | `data/avatars/<avatar_id>` 目录名。目录本身不进 Git，需要单独下载或拷贝。 |
+| `LIVETALKING_BATCH_SIZE` | `avatar.batch_size` | `4` | LiveTalking | 推理批大小。低延迟建议 `2-4`；吞吐优先可调大；显存不足调小。 |
+| `LIVETALKING_FPS` | `avatar.fps` | `25` | LiveTalking | 内部视频节奏。当前按 25fps 设计，通常不要改。 |
+| `LIVETALKING_TTS` | `tts.provider` | `robottts` | LiveTalking | TTS 插件。交接方案统一用 `robottts`。 |
+| `TTS_SERVER_URL` | `tts.server_url` | `http://127.0.0.1:8036` | LiveTalking | robottts 兼容 TTS 服务地址。LiveTalking 会连接它的 `/tts/ws`。 |
+| `ROBOTTTS_MODE` | `tts.robottts_mode` | `instruct2` | LiveTalking -> TTS | 透传给 TTS 服务的模式。测试后端支持 `instruct2` / `zero-shot`。 |
+| `LIVETALKING_TRANSPORT` | `output.transport` | `webrtc` | LiveTalking | 输出模块名。必须是 `webrtc` / `rtmp` / `rtcpush` / `virtualcam`；`alpha` 不是合法 transport。 |
+| `LIVETALKING_ALPHA_OUTPUT` | `output.alpha_output` | `1` | LiveTalking | 是否发布 `/alpha/ws`、`/alpha/audio`、`/alpha/input/audio`。桌面助手必须开启。 |
+
+端口联动规则：
+
+| 如果改了 | 同步修改 |
+| --- | --- |
+| `LIVETALKING_PORT` | `LIVETALKING_URL`、`LIVETALKING_WS_URL`、`testclient/.env` 的 `LIVETALKING_URL`、`LIVETALKING_WS_URL`、`LIVETALKING_SERVER`、`VITE_LIVETALKING_URL`、`VITE_ALPHA_INPUT_WS`。 |
+| `TTS_SERVICE_PORT` 或真实 TTS 端口 | LiveTalking `.env` 的 `TTS_SERVER_URL`、`testclient/.env` 的 `TTS_SERVER_URL`、`VITE_TTS_SERVER_URL`。 |
+| 远程机器访问地址 | 不要继续用 `127.0.0.1`；改成服务所在机器 IP，或确认 VS Code/SSH 端口转发已经把对应端口映射到本机。 |
+
+`LIVETALKING_URL` 和 `LIVETALKING_WS_URL` 主要给脚本、页面和人查看使用；LiveTalking 监听实际以 `LIVETALKING_HOST` / `LIVETALKING_PORT` 为准。浏览器里的 `VITE_*` 变量只在 `testclient/start-web.sh` 启动时注入，改完 `.env` 后必须重启 Web 测试页。
 
 所有 `data/avatars/*` 都被忽略，不进 Git。默认示例 avatar 由 `./scripts/download-models.sh wav2lip-demo` 下载；部署自己的数字人时，把 avatar 目录放到 `data/avatars/<avatar_id>/`，再设置 `AVATAR_ID=<avatar_id>`。
+
+## 0. 服务边界和链路
+
+完整方案不是一个单进程，而是三个角色通过 HTTP/WebSocket 连接：
+
+```text
+服务 A：LiveTalking 主服务，默认 8050
+  - 加载 avatar 和 wav2lip/musetalk/ultralight 模型
+  - 接收文本或外部 PCM 音频
+  - 做口型推理和画面合成
+  - 输出 WebRTC 页面、alpha RGBA 视频流、alpha PCM 音频流
+
+服务 B：robottts 兼容 TTS 服务，默认 8036
+  - 生产环境接真实 robot-tts 或同协议服务
+  - 测试环境可用 testclient/backend 的 edge/bailian provider
+  - 输入文本，输出 16kHz 单声道 PCM16 流
+
+服务 C：显示/测试客户端，默认 Web 8070，overlay 本机 Electron
+  - testclient/web 用浏览器测试 API、视频、音频
+  - testclient/overlay 用透明置顶窗口显示 /alpha/ws 视频
+  - 业务系统也可以自己实现这个角色
+```
+
+运行顺序：
+
+```text
+1. 准备 LiveTalking uv 环境和模型资产
+2. 启动 robottts 兼容 TTS 服务
+3. 启动 LiveTalking 主服务，并让 TTS_SERVER_URL 指向 TTS 服务
+4. 启动 testclient/web 或 overlay，连接 LiveTalking 的 8050
+5. 通过 /alpha/speak 或 /alpha/input/audio 触发数字人说话
+```
+
+两种输入链路的区别：
+
+| 链路 | 谁合成 TTS | 适合场景 | 数据流 |
+| --- | --- | --- | --- |
+| `/alpha/speak` | LiveTalking 内部的 `robottts` 插件主动调用 TTS 服务 | 最简单的文本驱动数字人 | 控制端把文本发给 LiveTalking，LiveTalking 再连 TTS `/tts/ws` 拉 PCM。 |
+| `/tts/task/start -> /alpha/input/audio` | 外部 TTS 服务主动生成并推送音频 | 现有 robot-tts、ASR/LLM/TTS 编排系统已经掌握任务流 | 控制端把任务发给 TTS，TTS 通过 WebSocket 把 PCM 推给 LiveTalking。 |
+
+视频输出链路独立于文本输入链路：
+
+```text
+LiveTalking 推理线程
+  -> streamout/webrtc.py 发布帧
+  -> server/alpha_stream.py 打包 RGBA
+  -> ws://<host>:8050/alpha/ws
+  -> testclient/web canvas 或 testclient/overlay Electron 窗口显示
+```
+
+如果你要接入自己的系统，最少要实现：
+
+- 一个 `robottts` 兼容 TTS 服务，或直接把 PCM 推到 LiveTalking `/alpha/input/audio`。
+- 一个显示端，消费 LiveTalking `/alpha/ws` 的 RGBA 帧；需要声音时再消费 `/alpha/audio`。
 
 ## 1. 当前方案
 
@@ -55,7 +146,8 @@ LIVETALKING_PORT=8051 AVATAR_ID=my_avatar ./entrypoint.sh
 
 - avatar 模型：`wav2lip`
 - TTS：`robottts`
-- 输出：普通浏览器用 WebRTC；桌面助手用 `LIVETALKING_ALPHA_OUTPUT=1` 或 `--alpha_output` + `testclient/overlay`
+- 默认显示输出：alpha stream，也就是 `LIVETALKING_ALPHA_OUTPUT=1` + `/alpha/ws`。Web 测试页和 overlay 默认都连接 alpha stream。
+- 兼容输出：官方 WebRTC 页面仍保留，但本地交接和桌面助手不以 WebRTC 作为默认显示链路。
 - 端口：TTS `8036`，LiveTalking `8050`，Web 测试页 `8070`
 
 功能和必需资产：
@@ -199,9 +291,10 @@ ws://127.0.0.1:8050/alpha/input/audio
 启动后常用地址：
 
 - `http://127.0.0.1:8050/index.html`
-- `http://127.0.0.1:8050/webrtcapi.html`
+- `http://127.0.0.1:8070`，testclient Web，默认自动连接 alpha stream。
 - `http://127.0.0.1:8050/admin.html`
 - `http://127.0.0.1:8050/avatar.html`
+- `http://127.0.0.1:8050/webrtcapi.html`，官方兼容 WebRTC 测试页，不是本地默认显示方式。
 
 如果绕过脚本直接运行 `python app.py`，不要在命令里写未加载的 `$AVATAR_ID`、`$TTS_SERVER_URL`、`$LIVETALKING_PORT`。直接用 `uv run --python .venv/bin/python python app.py` 时，程序会自己读取 `.env` 和 `config.yaml`；临时覆盖参数用 `LIVETALKING_PORT=8051 AVATAR_ID=my_avatar ./entrypoint.sh` 这种 ENV 前缀。
 
@@ -220,6 +313,7 @@ http://127.0.0.1:8070
 
 测试页面可验证：
 
+- 打开页面后默认自动创建 alpha session，并连接 `/alpha/ws?max_height=720&fps=8`。
 - TTS `/health` 和 `/tts/voices`
 - `/alpha/speak` 文本驱动
 - `/tts/task/start -> /alpha/input/audio` 音频流驱动
@@ -258,27 +352,68 @@ LIVETALKING_SERVER=http://<LiveTalking服务器IP>:8050 ./start-overlay.sh
 | `--customvideo_config` | JSON 文件路径 | 空 | 自定义动作/状态视频配置，用于空闲、说话等状态切换。 |
 | `--fps` | 必须 `25` | `25` | 当前音视频节奏按 25fps 设计，不建议修改。 |
 
-## 4. robottts 接口协议
+## 4. API 和模块传输协议
 
-LiveTalking 不需要知道 TTS 服务目录，只需要服务接口。
+LiveTalking、TTS 和显示端只通过接口通信，不依赖彼此的代码目录或存储路径。生产环境把接口地址配对即可。
 
-### 4.1 必要接口
+### 4.1 robottts 兼容 TTS 服务
 
-```text
-GET  /health
-GET  /tts/voices
-POST /tts
-WS   /tts/ws
-POST /tts/task/start
-```
+LiveTalking 的 `tts/robottts.py` 只依赖这些接口。真实 `robot-tts` 和 `testclient/backend` 都应保持同一协议。
 
-音频格式建议：
+| 方法 | 路径 | 方向 | 作用 |
+| --- | --- | --- | --- |
+| `GET` | `/health` | 控制端 -> TTS | 健康检查，同时返回音频格式等元信息。 |
+| `GET` | `/tts/voices` | 控制端/LiveTalking -> TTS | 查询音色列表，`voice_id` 从这里选。 |
+| `POST` | `/tts` | 控制端 -> TTS | 一次性合成 wav 文件，主要用于单独测试。 |
+| `WS` | `/tts/ws` | LiveTalking -> TTS | LiveTalking 内部 `robottts` 插件使用的流式合成接口。 |
+| `POST` | `/tts/task/create` | 控制端 -> TTS | 创建外部推流任务，可选。 |
+| `POST` | `/tts/task/submit` | 控制端 -> TTS | 提交任务文本，可选。 |
+| `POST` | `/tts/task/start` | 控制端 -> TTS | 创建并提交任务，测试客户端常用。 |
+| `POST` | `/tts/task/cancel` | 控制端 -> TTS | 取消任务。 |
+| `GET` | `/tts/task/status?task_id=...` | 控制端 -> TTS | 查询任务状态。 |
+
+推荐音频格式：
 
 ```text
 16kHz / mono / signed 16-bit PCM
 ```
 
-`/tts/ws` 消息流程：
+`GET /health` 典型返回：
+
+```json
+{
+  "status": "ok",
+  "sample_rate": 16000,
+  "channels": 1,
+  "sample_width": 2,
+  "format": "pcm",
+  "provider": "edge"
+}
+```
+
+`GET /tts/voices` 典型返回：
+
+```json
+{
+  "voices": [
+    {"id": 0, "name": "zh-CN-XiaoxiaoNeural", "description": "zh-CN-XiaoxiaoNeural"}
+  ]
+}
+```
+
+`POST /tts` 典型请求：
+
+```json
+{
+  "text": "你好，我是数字人。",
+  "voice_id": 0,
+  "mode": "instruct2",
+  "prompts": "请自然清晰地朗读。",
+  "output_path": "/tmp/robottts-output.wav"
+}
+```
+
+`WS /tts/ws` 消息流程：
 
 ```text
 client -> {"action":"start","voice_id":0,"mode":"instruct2","prompts":"..."}
@@ -289,7 +424,53 @@ server -> {"action":"result","type":"final","meta":{...}}
 client -> {"action":"end"}
 ```
 
-### 4.2 文本驱动数字人
+其中 binary PCM chunks 是原始 PCM16 字节流，不是 wav 文件，不带 wav header。
+
+### 4.2 LiveTalking 主服务 API
+
+LiveTalking 默认监听：
+
+```text
+http://127.0.0.1:8050
+```
+
+主要接口：
+
+| 方法 | 路径 | 方向 | 作用 |
+| --- | --- | --- | --- |
+| `POST` | `/alpha/session` | 显示端/控制端 -> LiveTalking | 创建或复用桌面 alpha session。overlay 启动时会调用。 |
+| `POST` | `/alpha/speak` | 控制端 -> LiveTalking | 输入文本，由 LiveTalking 调 TTS，再驱动 avatar。 |
+| `WS` | `/alpha/input/audio` | 外部 TTS -> LiveTalking | 输入外部 PCM 音频流，绕过 LiveTalking 内部 TTS。 |
+| `WS` | `/alpha/ws` | 显示端 <- LiveTalking | 输出 raw RGBA 视频帧。 |
+| `WS` | `/alpha/audio` | 显示端 <- LiveTalking | 输出 LiveTalking 侧音频 PCM16。 |
+| `POST` | `/alpha/close` | 显示端/控制端 -> LiveTalking | 关闭 alpha session。 |
+| `POST` | `/interrupt_talk` | 控制端 -> LiveTalking | 打断当前朗读。 |
+| `POST` | `/is_speaking` | 控制端 -> LiveTalking | 查询 session 是否正在说话。 |
+| `GET` | `/api/admin/config` | 控制端 -> LiveTalking | 查看当前配置。 |
+| `GET` | `/api/admin/sessions` | 控制端 -> LiveTalking | 查看当前 session。 |
+
+`POST /alpha/session` 请求：
+
+```json
+{
+  "reuse": true,
+  "sessionid": ""
+}
+```
+
+返回：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {"sessionid": "0"}
+}
+```
+
+可以在请求体里带 `avatar_id`、`batch_size`、`tts`、`TTS_SERVER` 等 session 参数，只有 avatar 构造需要的字段会被使用。大多数场景保持空请求即可，由 `.env` 和 `config.yaml` 控制。
+
+### 4.3 文本驱动数字人
 
 推荐通过 LiveTalking 统一入口：
 
@@ -318,7 +499,21 @@ curl -X POST http://127.0.0.1:8050/alpha/speak \
 | `ref_file` | 字符串/整数 | 兼容 LiveTalking 旧字段，会映射到 `voice_id`。 |
 | `ref_text` | 字符串 | 兼容旧字段，会映射到 `prompts`。 |
 
-### 4.3 外部音频流驱动数字人
+这条链路内部实际发生：
+
+```text
+控制端 POST /alpha/speak
+  -> LiveTalking 创建/复用 alpha session
+  -> avatar_session.put_msg_txt(text, {"tts": ...})
+  -> tts/robottts.py 连接 ws://<TTS_SERVER>/tts/ws
+  -> TTS 返回 PCM16 binary chunks
+  -> LiveTalking 转 float32 audio frame
+  -> wav2lip ASR/audio feature
+  -> avatar 推理生成视频帧
+  -> /alpha/ws 输出 RGBA
+```
+
+### 4.4 外部音频流驱动数字人
 
 如果指令和音频来自其他组件，用 TTS task API 直接推音频到 LiveTalking：
 
@@ -341,6 +536,102 @@ curl -X POST http://127.0.0.1:8036/tts/task/start \
 ws://<LiveTalking服务器IP>:<LiveTalking端口>/alpha/input/audio
 ```
 
+这条链路内部实际发生：
+
+```text
+控制端 POST /tts/task/start 到 TTS 服务
+  -> TTS 服务连接 ws://<LiveTalking>/alpha/input/audio
+  -> TTS 先发 start JSON，LiveTalking 回 started
+  -> TTS 持续发 PCM16 binary chunks
+  -> TTS 发 end JSON
+  -> LiveTalking 把 PCM 转成内部 float32 audio frame
+  -> wav2lip 推理并输出 /alpha/ws 视频
+```
+
+`/alpha/input/audio` WebSocket 消息格式：
+
+```text
+TTS -> LiveTalking JSON:
+{
+  "type": "start",
+  "task_id": "demo-001",
+  "stream_name": "tts",
+  "text": "这段音频由外部 TTS 生成。",
+  "sample_rate": 16000,
+  "channels": 1,
+  "sample_width": 2,
+  "format": "pcm",
+  "provider": "edge"
+}
+
+LiveTalking -> TTS JSON:
+{
+  "type": "started",
+  "task_id": "demo-001",
+  "sessionid": "0"
+}
+
+TTS -> LiveTalking binary:
+PCM16 chunk bytes
+
+TTS -> LiveTalking JSON:
+{
+  "type": "end",
+  "task_id": "demo-001",
+  "reason": "completed"
+}
+```
+
+LiveTalking 支持输入端声明不同采样率或多声道，会在 `/alpha/input/audio` 内部重采样并取第一声道；为了低延迟和少出错，仍建议直接发 `16000/mono/PCM16`。
+
+### 4.5 alpha 视频和音频输出
+
+`/alpha/ws` 是桌面透明输出的核心接口，只有 `LIVETALKING_ALPHA_OUTPUT=1` 或 CLI `--alpha_output` 开启后才有意义。
+
+WebSocket 每条 binary message 格式：
+
+```text
+24 byte little-endian header + width * height * 4 RGBA bytes
+```
+
+header 字段：
+
+| 字节 | 类型 | 含义 |
+| --- | --- | --- |
+| `0-3` | `char[4]` | magic，固定 `LTAF`。 |
+| `4` | `uint8` | version，当前为 `1`。 |
+| `5` | `uint8` | format，当前 `1` 表示 `RGBA8`。 |
+| `6-7` | `uint16` | flags，当前为 `0`。 |
+| `8-11` | `uint32` | width。 |
+| `12-15` | `uint32` | height。 |
+| `16-23` | `uint64` | seq，自增帧号。 |
+
+像素数据是 `RGBA8`，每个像素 4 字节，顺序为 `R,G,B,A`。`width/height` 来自当前 avatar 的 `full_imgs` 画布尺寸；如果 avatar 是普通 BGR/BGRA 图，服务端会统一转换成 RGBA。没有透明通道的 avatar 会补全不透明 alpha。
+
+`/alpha/ws` 支持预览参数：
+
+| 参数 | 示例 | 说明 |
+| --- | --- | --- |
+| `max_width` | `/alpha/ws?max_width=720` | 只对当前客户端缩小输出宽度，不改变服务端原始 avatar。 |
+| `max_height` | `/alpha/ws?max_height=720` | 只对当前客户端缩小输出高度。 |
+| `fps` | `/alpha/ws?fps=8` | 限制当前客户端收到的帧率。 |
+
+高分辨率 avatar 会产生很大的 raw RGBA 帧，例如 `1920x1080x4` 每帧约 `7.9MB`。Web 调试页建议用：
+
+```text
+ws://127.0.0.1:8050/alpha/ws?max_height=720&fps=8
+```
+
+overlay 默认也走 alpha stream。为了避免高分辨率 raw RGBA 卡顿，`testclient/.env.example` 默认让 overlay 连接 `/alpha/ws?max_height=1080&fps=15`；如果必须无损原始帧，把 `LIVETALKING_VIDEO_MAX_HEIGHT` 和 `LIVETALKING_VIDEO_FPS` 设为 `0`。
+
+`/alpha/audio` 输出 LiveTalking 侧音频：
+
+```text
+WebSocket binary PCM16 chunks，16kHz mono
+```
+
+通常只让一个地方播放声音。如果 TTS 服务或业务组件已经播放音频，overlay 和 Web 页应关闭 `/alpha/audio` 播放，避免重复声音。
+
 ## 5. 测试客户端
 
 `testclient/` 是独立测试包，不参与 LiveTalking 主配置。
@@ -351,6 +642,35 @@ testclient/
   web/       浏览器可视化测试页面，npm 独立依赖
   overlay/   Electron 透明置顶窗口，npm 独立依赖
 ```
+
+### 5.0 配置分工
+
+`testclient/.env` 同时给 `start-tts.sh`、`start-web.sh`、`start-overlay.sh` 读取，但每类变量的使用者不同：
+
+| 变量前缀/名称 | 谁读取 | 作用 |
+| --- | --- | --- |
+| `TEST_TTS_*`、`TTS_SERVICE_*`、`ROBOT_TTS_EDGE_*`、`BAILIAN_*`、`DASHSCOPE_API_KEY` | `testclient/backend` | 控制测试 TTS 服务。生产接真实 robot-tts 时不需要启动这个后端。 |
+| `LIVETALKING_URL`、`LIVETALKING_WS_URL` | 测试脚本和部分客户端逻辑 | LiveTalking 主服务 HTTP/WS 地址。 |
+| `VITE_*` | `testclient/web` | 浏览器页面编译期环境变量。改完必须重启 `./start-web.sh`。 |
+| `LIVETALKING_SERVER`、`LIVETALKING_VIDEO_*`、`LIVETALKING_PLAY_AUDIO` | `testclient/overlay` | Electron 透明窗口连接和显示参数。 |
+| `TTS_SERVER_URL` | 测试后端、也可复制给 LiveTalking 主服务 | robottts 兼容 TTS HTTP 基地址。 |
+
+默认单机配置应保持这几组地址一致：
+
+```bash
+TTS_SERVICE_PORT=8036
+TTS_SERVER_URL=http://127.0.0.1:8036
+VITE_TTS_SERVER_URL=http://127.0.0.1:8036
+
+LIVETALKING_PORT=8050
+LIVETALKING_URL=http://127.0.0.1:8050
+LIVETALKING_WS_URL=ws://127.0.0.1:8050
+LIVETALKING_SERVER=http://127.0.0.1:8050
+VITE_LIVETALKING_URL=http://127.0.0.1:8050
+VITE_ALPHA_INPUT_WS=ws://127.0.0.1:8050/alpha/input/audio
+```
+
+如果 Web 页面、TTS 服务、LiveTalking 不在同一台机器，浏览器里的 `127.0.0.1` 指的是浏览器所在机器，不是 GPU 服务器。此时 `VITE_LIVETALKING_URL`、`VITE_TTS_SERVER_URL`、`VITE_ALPHA_INPUT_WS` 要写成浏览器能访问到的 IP、域名或端口转发地址。
 
 ### 5.1 backend 参数
 
@@ -372,7 +692,28 @@ testclient/
 | `BAILIAN_INSTRUCTION_FIELD` | 字段名 | `instructions` | 百炼指令字段名。 |
 | `BAILIAN_USE_PROMPTS_AS_INSTRUCTIONS` | `1/0` | `1` | 是否把 `prompts` 作为指令传给百炼。 |
 
-### 5.2 overlay 参数
+### 5.2 Web 参数
+
+| 变量 | 可选/范围 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `TEST_CLIENT_HOST` | IP | `0.0.0.0` | Vite Web 测试页监听地址。 |
+| `TEST_CLIENT_PORT` | `1-65535` | `8070` | Vite Web 测试页端口。 |
+| `VITE_LIVETALKING_URL` | HTTP 地址 | `http://127.0.0.1:8050` | 浏览器访问 LiveTalking 的 HTTP 基地址。 |
+| `VITE_TTS_SERVER_URL` | HTTP 地址 | `http://127.0.0.1:8036` | 浏览器访问 robottts 兼容 TTS 的 HTTP 基地址。 |
+| `VITE_ALPHA_INPUT_WS` | WebSocket 地址 | `ws://127.0.0.1:8050/alpha/input/audio` | TTS task 推流目标。端口必须和 LiveTalking 一致。 |
+| `VITE_ALPHA_AUDIO_SAMPLE_RATE` | 正整数 | `16000` | 浏览器播放 `/alpha/audio` 时使用的采样率。 |
+| `VITE_ALPHA_VIDEO_MAX_HEIGHT` | 非负整数 px | `720` | Web 预览请求 `/alpha/ws` 的最大高度，`0` 表示不限制。 |
+| `VITE_ALPHA_VIDEO_FPS` | 非负数 | `8` | Web 预览请求 `/alpha/ws` 的帧率，`0` 表示不限制。 |
+| `VITE_VIDEO_RENDER_INTERVAL_MS` | 非负整数 ms | `125` | 浏览器 canvas 渲染限频。按钮卡顿时可调大。 |
+| `VITE_ALPHA_AUTO_CONNECT` | `1/0` | `1` | 页面打开后是否自动创建 alpha session 并连接视频。 |
+| `VITE_DEFAULT_TEXT` | 字符串 | 示例文本 | 页面输入框默认文本。 |
+| `VITE_DEFAULT_PROMPTS` | 字符串 | 示例提示词 | 页面 TTS prompts 默认值。 |
+| `VITE_DEFAULT_VOICE_ID` | 非负整数 | `0` | 页面默认音色编号。 |
+| `VITE_DEFAULT_MODE` | `instruct2` / `zero-shot` | `instruct2` | 页面默认 TTS 模式。 |
+
+Web 页面只用于测试和控制，不负责真正的桌面置顶显示。要叠在 PPT 上显示数字人，使用 overlay 或自研显示端消费 `/alpha/ws`。
+
+### 5.3 overlay 参数
 
 | 变量 | 可选/范围 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -385,6 +726,9 @@ testclient/
 | `LIVETALKING_RENDERER` | `webgl` / `2d` | `webgl` | 渲染方式。GPU 进程异常时可用 `2d`。 |
 | `LIVETALKING_CONTROL_WIDTH` | 正整数 px | `340` | 控制条宽度。 |
 | `LIVETALKING_CONTROL_HEIGHT` | 正整数 px | `38` | 控制条高度。 |
+| `LIVETALKING_VIDEO_MAX_WIDTH` | 非负整数 px | `0` | overlay 请求 alpha stream 的最大宽度，`0` 表示不限制。 |
+| `LIVETALKING_VIDEO_MAX_HEIGHT` | 非负整数 px | `1080` | overlay 请求 alpha stream 的最大高度，用于降低 raw RGBA 传输压力。 |
+| `LIVETALKING_VIDEO_FPS` | 非负数 | `15` | overlay 请求 alpha stream 的帧率，`0` 表示不限制。 |
 | `LIVETALKING_X` / `LIVETALKING_Y` | 屏幕坐标 | 空 | 初始窗口位置。 |
 
 overlay 显示尺寸来自 `/alpha/ws` 帧头的 `width/height`，也就是 avatar `full_imgs` 原始画布尺寸。缩放只影响桌面显示大小，不裁剪原始帧。

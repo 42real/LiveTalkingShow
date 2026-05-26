@@ -23,6 +23,10 @@ class _Client:
     ws: web.WebSocketResponse
     queue: asyncio.Queue
     task: asyncio.Task
+    max_width: int = 0
+    max_height: int = 0
+    fps: float = 0.0
+    next_send_at: float = 0.0
 
 
 class LatestFrameHub:
@@ -51,16 +55,33 @@ class LatestFrameHub:
         self._loop = loop
         logger.info("alpha frame hub bound to event loop id=%s", id(loop))
 
-    async def add_client(self, ws: web.WebSocketResponse):
+    def has_clients(self) -> bool:
+        with self._lock:
+            return bool(self._clients)
+
+    async def add_client(self, ws: web.WebSocketResponse, max_width: int = 0, max_height: int = 0, fps: float = 0.0):
         queue = asyncio.Queue(maxsize=1)
         task = asyncio.create_task(self._pump(ws, queue))
         with self._lock:
-            self._clients[ws] = _Client(ws=ws, queue=queue, task=task)
-            last_packet = self._last_packet
+            self._clients[ws] = _Client(
+                ws=ws,
+                queue=queue,
+                task=task,
+                max_width=max_width,
+                max_height=max_height,
+                fps=fps,
+            )
+            last_packet = self._last_packet if not max_width and not max_height else None
             client_count = len(self._clients)
         if last_packet:
             self._replace_latest(queue, last_packet)
-        logger.info("alpha raw video websocket registered clients=%d", client_count)
+        logger.info(
+            "alpha raw video websocket registered clients=%d max_width=%d max_height=%d fps=%.1f",
+            client_count,
+            max_width,
+            max_height,
+            fps,
+        )
 
     def remove_client(self, ws: web.WebSocketResponse):
         with self._lock:
@@ -82,39 +103,78 @@ class LatestFrameHub:
             )
             return
 
-        if not frame.flags["C_CONTIGUOUS"]:
-            frame = np.ascontiguousarray(frame)
+        height, width = frame.shape[:2]
 
-        # OpenCV keeps images as BGR/BGRA, while Canvas ImageData expects RGBA.
-        # Non-transparent avatars are valid too; give them a fully opaque alpha.
-        if frame.shape[2] == 4:
-            rgba = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
-        else:
-            rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
-        height, width = rgba.shape[:2]
-        payload = rgba.tobytes()
-
+        now = time.monotonic()
         with self._lock:
             self._seq += 1
-            packet = FRAME_HEADER.pack(
-                FRAME_MAGIC,
-                FRAME_VERSION,
-                FRAME_FORMAT_RGBA8,
-                0,
-                width,
-                height,
-                self._seq,
-            ) + payload
-            self._last_packet = packet
+            seq = self._seq
             clients = list(self._clients.values())
             loop = self._loop
-            self._log_publish_locked(width, height, rgba, len(clients))
+            send_clients = []
+            for client in clients:
+                if client.fps > 0:
+                    interval = 1.0 / client.fps
+                    if client.next_send_at and now < client.next_send_at:
+                        continue
+                    if client.next_send_at:
+                        missed_intervals = int((now - client.next_send_at) // interval)
+                        client.next_send_at += (missed_intervals + 1) * interval
+                    else:
+                        client.next_send_at = now + interval
+                send_clients.append(client)
+            self._log_publish_locked(width, height, frame, len(clients))
 
-        if not clients or loop is None:
+        if not send_clients or loop is None:
             return
 
-        for client in clients:
-            loop.call_soon_threadsafe(self._replace_latest, client.queue, packet)
+        full_packet = None
+        for client in send_clients:
+            if client.max_width or client.max_height:
+                client_frame = self._resize_for_client(frame, client)
+                client_packet = self._make_packet(self._to_rgba(client_frame), seq)
+            else:
+                if full_packet is None:
+                    full_packet = self._make_packet(self._to_rgba(frame), seq)
+                    with self._lock:
+                        self._last_packet = full_packet
+                client_packet = full_packet
+            loop.call_soon_threadsafe(self._replace_latest, client.queue, client_packet)
+
+    def _to_rgba(self, frame: np.ndarray) -> np.ndarray:
+        if not frame.flags["C_CONTIGUOUS"]:
+            frame = np.ascontiguousarray(frame)
+        if frame.shape[2] == 4:
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+
+    def _make_packet(self, rgba: np.ndarray, seq: int) -> bytes:
+        height, width = rgba.shape[:2]
+        if not rgba.flags["C_CONTIGUOUS"]:
+            rgba = np.ascontiguousarray(rgba)
+        return FRAME_HEADER.pack(
+            FRAME_MAGIC,
+            FRAME_VERSION,
+            FRAME_FORMAT_RGBA8,
+            0,
+            width,
+            height,
+            seq,
+        ) + rgba.tobytes()
+
+    def _resize_for_client(self, frame: np.ndarray, client: _Client) -> np.ndarray:
+        height, width = frame.shape[:2]
+        scale = 1.0
+        if client.max_width > 0 and width > client.max_width:
+            scale = min(scale, client.max_width / width)
+        if client.max_height > 0 and height > client.max_height:
+            scale = min(scale, client.max_height / height)
+        if scale >= 1.0:
+            return frame
+
+        target_width = max(1, int(round(width * scale)))
+        target_height = max(1, int(round(height * scale)))
+        return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
 
     def _replace_latest(self, queue: asyncio.Queue, packet: bytes):
         dropped = 0
@@ -151,9 +211,9 @@ class LatestFrameHub:
             logger.exception("alpha raw video websocket pump exception")
             self.remove_client(ws)
 
-    def _log_publish_locked(self, width: int, height: int, rgba: np.ndarray, client_count: int):
+    def _log_publish_locked(self, width: int, height: int, frame: np.ndarray, client_count: int):
         now = time.monotonic()
-        shape = (height, width, rgba.shape[2], str(rgba.dtype))
+        shape = (height, width, frame.shape[2], str(frame.dtype))
         shape_changed = shape != self._last_shape
         first_frame = self._seq == 1
         periodic = now - self._last_log_time >= 5.0
@@ -168,7 +228,7 @@ class LatestFrameHub:
             self._seq,
             width,
             height,
-            rgba.dtype,
+            frame.dtype,
             client_count,
             fps,
             self._dropped_packets,
@@ -194,6 +254,10 @@ class AudioHub:
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
         logger.info("alpha audio hub bound to event loop id=%s", id(loop))
+
+    def has_clients(self) -> bool:
+        with self._lock:
+            return bool(self._clients)
 
     async def add_client(self, ws: web.WebSocketResponse):
         queue = asyncio.Queue(maxsize=64)
@@ -284,11 +348,48 @@ alpha_frame_hub = LatestFrameHub()
 alpha_audio_hub = AudioHub()
 
 
+def _query_int(request: web.Request, name: str, default: int = 0, min_value: int = 0, max_value: int = 4096) -> int:
+    raw = request.query.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+def _query_float(
+    request: web.Request,
+    name: str,
+    default: float = 0.0,
+    min_value: float = 0.0,
+    max_value: float = 60.0,
+) -> float:
+    raw = request.query.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, value))
+
+
 async def alpha_ws(request):
     ws = web.WebSocketResponse(max_msg_size=0, compress=False)
     await ws.prepare(request)
-    await alpha_frame_hub.add_client(ws)
-    logger.info("alpha raw video websocket connected peer=%s", request.remote)
+    max_width = _query_int(request, "max_width")
+    max_height = _query_int(request, "max_height")
+    fps = _query_float(request, "fps")
+    await alpha_frame_hub.add_client(ws, max_width=max_width, max_height=max_height, fps=fps)
+    logger.info(
+        "alpha raw video websocket connected peer=%s max_width=%d max_height=%d fps=%.1f",
+        request.remote,
+        max_width,
+        max_height,
+        fps,
+    )
     try:
         async for msg in ws:
             if msg.type == WSMsgType.ERROR:

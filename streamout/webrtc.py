@@ -43,8 +43,9 @@ class WebRTCOutput(BaseOutput):
     def push_video_frame(self, frame) -> None:
         if getattr(self.opt, "alpha_output", False):
             self._pace_alpha_frame()
-            self._log_alpha_video_frame(frame)
-            alpha_frame_hub.publish_frame(frame)
+            if alpha_frame_hub.has_clients():
+                self._log_alpha_video_frame(frame)
+                alpha_frame_hub.publish_frame(frame)
         if self._player:
             if getattr(frame, "ndim", 0) == 3 and frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
@@ -52,8 +53,9 @@ class WebRTCOutput(BaseOutput):
 
     def push_audio_frame(self, frame, eventpoint=None) -> None:
         if getattr(self.opt, "alpha_output", False):
-            self._log_alpha_audio_frame(frame, eventpoint)
-            alpha_audio_hub.publish_bytes(frame.tobytes())
+            if alpha_audio_hub.has_clients():
+                self._log_alpha_audio_frame(frame, eventpoint)
+                alpha_audio_hub.publish_bytes(frame.tobytes())
         if self._player:
             self._player.push_audio(frame, eventpoint)
 
