@@ -5,6 +5,9 @@ import base64
 import json
 import logging
 import os
+import platform
+import subprocess
+import tempfile
 import uuid
 import wave
 from dataclasses import dataclass
@@ -96,6 +99,11 @@ def _get_provider() -> str:
     if raw in {"bailian", "cosyvoice", "cosyvoice3"}:
         return "bailian"
     raise ValueError("TEST_TTS_PROVIDER must be edge or bailian")
+
+
+def _use_sapi_fallback() -> bool:
+    enabled = os.getenv("TEST_TTS_SAPI_FALLBACK", "0").strip().lower() in {"1", "true", "yes", "on"}
+    return enabled and platform.system().lower() == "windows"
 
 
 def _get_voices() -> list[str]:
@@ -211,6 +219,39 @@ async def _synthesize_edge_pcm(text: str, voice_id: int) -> bytes:
 
     stream = np.clip(stream, -1.0, 1.0)
     return (stream * 32767.0).astype("<i2").tobytes()
+
+
+async def _synthesize_sapi_pcm(text: str) -> bytes:
+    def run_sapi():
+        with tempfile.TemporaryDirectory(prefix="robottts-sapi-") as tmp_dir:
+            wav_path = Path(tmp_dir) / "speech.wav"
+            script = (
+                "Add-Type -AssemblyName System.Speech; "
+                f"$s=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                f"$s.SetOutputToWaveFile('{wav_path}'); "
+                f"$s.Speak({json.dumps(text, ensure_ascii=False)}); "
+                "$s.Dispose();"
+            )
+            subprocess.run(
+                ["pwsh", "-NoProfile", "-Command", script],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stream, sample_rate = sf.read(str(wav_path), dtype="float32")
+
+        if stream.ndim > 1:
+            stream = stream[:, 0]
+
+        target_rate = _get_sample_rate()
+        if sample_rate != target_rate and stream.size > 0:
+            stream = resampy.resample(stream, sample_rate, target_rate)
+
+        stream = np.clip(stream, -1.0, 1.0)
+        return (stream * 32767.0).astype("<i2").tobytes()
+
+    return await asyncio.to_thread(run_sapi)
 
 
 def _get_bailian_api_key() -> str:
@@ -348,7 +389,13 @@ async def _iter_tts_chunks(text: str, voice_id: int, prompts: str, mode: str):
             yield chunk
         return
 
-    pcm = await _synthesize_edge_pcm(text, voice_id)
+    try:
+        pcm = await _synthesize_edge_pcm(text, voice_id)
+    except Exception:
+        if not _use_sapi_fallback():
+            raise
+        logger.exception("edge synthesis failed; falling back to Windows SAPI")
+        pcm = await _synthesize_sapi_pcm(text)
     for chunk in _iter_pcm_chunks(pcm):
         yield chunk
 

@@ -110,11 +110,38 @@ class LipReal(BaseAvatar):
         # self.res_frame_queue = Queue(self.batch_size*2)
         self.model = model
         self.face_input_size = WAV2LIP_FACE_SIZE
+        self.runtime_pads = [0, 0, 0, 0]
 
         self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle = avatar
 
         self.asr = MelASR(opt,self)
         self.asr.warm_up()
+
+    def set_runtime_pads(self, pads):
+        values = [int(v) for v in pads[:4]]
+        while len(values) < 4:
+            values.append(0)
+        self.runtime_pads = [max(-300, min(300, v)) for v in values]
+
+    def get_runtime_config(self):
+        source_h, source_w = self.frame_list_cycle[0].shape[:2]
+        base_bbox = self.coord_list_cycle[0]
+        return {
+            "pads": list(self.runtime_pads),
+            "source_width": source_w,
+            "source_height": source_h,
+            "base_bbox": self._bbox_to_xyxy(base_bbox, [0, 0, 0, 0], source_w, source_h),
+            "padded_bbox": self._bbox_to_xyxy(base_bbox, self.runtime_pads, source_w, source_h),
+        }
+
+    def _bbox_to_xyxy(self, bbox, pads, source_w, source_h):
+        y1, y2, x1, x2 = bbox
+        top, bottom, left, right = pads
+        y1 = max(0, min(source_h - 1, int(y1) - top))
+        y2 = max(y1 + 1, min(source_h, int(y2) + bottom))
+        x1 = max(0, min(source_w - 1, int(x1) - left))
+        x2 = max(x1 + 1, min(source_w, int(x2) + right))
+        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
     
     def inference_batch(self, index, audiofeat_batch):
         # 这里的 index 是针对当前 avatar 的索引
@@ -148,7 +175,9 @@ class LipReal(BaseAvatar):
     def paste_back_frame(self,pred_frame,idx:int):
         bbox = self.coord_list_cycle[idx]
         combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
-        y1, y2, x1, x2 = bbox
+        source_h, source_w = combine_frame.shape[:2]
+        padded = self._bbox_to_xyxy(bbox, self.runtime_pads, source_w, source_h)
+        x1, y1, x2, y2 = padded["x1"], padded["y1"], padded["x2"], padded["y2"]
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
         if combine_frame.ndim == 3 and combine_frame.shape[2] == 4:
             combine_frame[y1:y2, x1:x2, :3] = res_frame

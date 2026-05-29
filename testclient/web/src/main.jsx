@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Cable, Mic, Play, RotateCcw, Send, Square, Video, Volume2, VolumeX } from 'lucide-react';
+import { Activity, Cable, Eye, EyeOff, Mic, Play, RotateCcw, Send, SlidersHorizontal, Square, Video, Volume2, VolumeX } from 'lucide-react';
 import './styles.css';
 
 function wsUrl(base, path) {
@@ -13,6 +13,11 @@ function wsUrl(base, path) {
 }
 
 const DEFAULT_LIVETALKING_URL = import.meta.env.VITE_LIVETALKING_URL || 'http://127.0.0.1:8050';
+const URL_PARAMS = new URLSearchParams(window.location.search);
+
+function paramOrEnv(paramName, envName, fallback) {
+  return URL_PARAMS.get(paramName) ?? import.meta.env[envName] ?? fallback;
+}
 
 const DEFAULTS = {
   liveTalkingUrl: DEFAULT_LIVETALKING_URL,
@@ -23,10 +28,19 @@ const DEFAULTS = {
   voiceId: Number.parseInt(import.meta.env.VITE_DEFAULT_VOICE_ID || '0', 10),
   mode: import.meta.env.VITE_DEFAULT_MODE || 'instruct2',
   audioSampleRate: Number.parseInt(import.meta.env.VITE_ALPHA_AUDIO_SAMPLE_RATE || '16000', 10),
-  videoMaxHeight: Number.parseInt(import.meta.env.VITE_ALPHA_VIDEO_MAX_HEIGHT || '720', 10),
-  videoPreviewFps: Number.parseFloat(import.meta.env.VITE_ALPHA_VIDEO_FPS || '8'),
-  videoRenderIntervalMs: Math.max(33, Number.parseInt(import.meta.env.VITE_VIDEO_RENDER_INTERVAL_MS || '125', 10)),
+  videoMaxHeight: Number.parseInt(paramOrEnv('max_height', 'VITE_ALPHA_VIDEO_MAX_HEIGHT', '0'), 10),
+  videoPreviewFps: Number.parseFloat(paramOrEnv('fps', 'VITE_ALPHA_VIDEO_FPS', '25')),
+  videoRenderIntervalMs: Math.max(16, Number.parseInt(paramOrEnv('render_ms', 'VITE_VIDEO_RENDER_INTERVAL_MS', '40'), 10)),
+  sharpness: Math.max(0, Math.min(100, Number.parseInt(paramOrEnv('sharpness', 'VITE_ALPHA_SHARPNESS', '0'), 10))),
+  videoFit: paramOrEnv('fit', 'VITE_ALPHA_VIDEO_FIT', 'contain'),
   alphaAutoConnect: (import.meta.env.VITE_ALPHA_AUTO_CONNECT || '1') !== '0'
+};
+
+const PAD_LABELS = {
+  top: '上',
+  bottom: '下',
+  left: '左',
+  right: '右'
 };
 
 function parseFrame(packet) {
@@ -53,6 +67,14 @@ function App() {
   const [prompts, setPrompts] = useState(DEFAULTS.prompts);
   const [voiceId, setVoiceId] = useState(DEFAULTS.voiceId);
   const [mode, setMode] = useState(DEFAULTS.mode);
+  const [videoMaxHeight, setVideoMaxHeight] = useState(DEFAULTS.videoMaxHeight);
+  const [videoPreviewFps, setVideoPreviewFps] = useState(DEFAULTS.videoPreviewFps);
+  const [videoRenderIntervalMs, setVideoRenderIntervalMs] = useState(DEFAULTS.videoRenderIntervalMs);
+  const [sharpness, setSharpness] = useState(DEFAULTS.sharpness);
+  const [showOverlay, setShowOverlay] = useState(true);
+  const [pads, setPads] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
+  const [tuningInfo, setTuningInfo] = useState(null);
+  const [canvasBox, setCanvasBox] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [voices, setVoices] = useState([]);
   const [sessionId, setSessionId] = useState('');
   const [status, setStatus] = useState('idle');
@@ -62,6 +84,7 @@ function App() {
   const [audioInfo, setAudioInfo] = useState({ chunks: 0, bytes: 0 });
   const [logs, setLogs] = useState([]);
   const canvasRef = useRef(null);
+  const stageRef = useRef(null);
   const socketRef = useRef(null);
   const audioSocketRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -85,10 +108,58 @@ function App() {
     return {
       live,
       tts,
-      alphaWs: wsUrl(live, `/alpha/ws?max_height=${DEFAULTS.videoMaxHeight}&fps=${DEFAULTS.videoPreviewFps}`),
+      alphaWs: wsUrl(live, `/alpha/ws?max_height=${videoMaxHeight}&fps=${videoPreviewFps}`),
       audioWs: wsUrl(live, '/alpha/audio')
     };
-  }, [liveTalkingUrl, ttsServerUrl]);
+  }, [liveTalkingUrl, ttsServerUrl, videoMaxHeight, videoPreviewFps]);
+
+  const updateCanvasBox = useCallback(() => {
+    const canvas = canvasRef.current;
+    const stage = stageRef.current;
+    if (!canvas || !stage) return;
+    const canvasRect = canvas.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    setCanvasBox({
+      left: canvasRect.left - stageRect.left,
+      top: canvasRect.top - stageRect.top,
+      width: canvasRect.width,
+      height: canvasRect.height
+    });
+  }, []);
+
+  useEffect(() => {
+    updateCanvasBox();
+    window.addEventListener('resize', updateCanvasBox);
+    return () => window.removeEventListener('resize', updateCanvasBox);
+  }, [updateCanvasBox]);
+
+  const buildOverlayStyle = useCallback((bbox) => {
+    if (!showOverlay || !bbox || !canvasBox.width || !canvasBox.height) return null;
+    const sourceWidth = tuningInfo?.source_width || frameInfo.width || 1;
+    const sourceHeight = tuningInfo?.source_height || frameInfo.height || 1;
+    const scaleX = canvasBox.width / sourceWidth;
+    const scaleY = canvasBox.height / sourceHeight;
+    return {
+      left: `${canvasBox.left + bbox.x1 * scaleX}px`,
+      top: `${canvasBox.top + bbox.y1 * scaleY}px`,
+      width: `${Math.max(1, (bbox.x2 - bbox.x1) * scaleX)}px`,
+      height: `${Math.max(1, (bbox.y2 - bbox.y1) * scaleY)}px`
+    };
+  }, [canvasBox, frameInfo.height, frameInfo.width, showOverlay, tuningInfo]);
+
+  const baseOverlayStyle = useMemo(
+    () => buildOverlayStyle(tuningInfo?.base_bbox),
+    [buildOverlayStyle, tuningInfo]
+  );
+  const paddedOverlayStyle = useMemo(
+    () => buildOverlayStyle(tuningInfo?.padded_bbox),
+    [buildOverlayStyle, tuningInfo]
+  );
+  const canvasStyle = useMemo(() => ({
+    filter: sharpness > 0
+      ? `contrast(${1 + sharpness * 0.006}) saturate(${1 + sharpness * 0.002})`
+      : 'none'
+  }), [sharpness]);
 
   const drawFrame = useCallback((packet) => {
     const frame = parseFrame(packet);
@@ -104,6 +175,7 @@ function App() {
     }
     const ctx = canvas.getContext('2d');
     ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    window.requestAnimationFrame(updateCanvasBox);
 
     const stats = frameStatsRef.current;
     const now = performance.now();
@@ -116,7 +188,7 @@ function App() {
       stats.fps = fps;
     }
     setFrameInfo({ width: frame.width, height: frame.height, seq: frame.seq, fps });
-  }, [addLog]);
+  }, [addLog, updateCanvasBox]);
 
   const renderLatestFrame = useCallback(() => {
     renderTimerRef.current = 0;
@@ -132,9 +204,9 @@ function App() {
     latestFramePacketRef.current = packet;
     if (renderTimerRef.current) return;
     const elapsed = performance.now() - lastVideoDrawAtRef.current;
-    const wait = Math.max(0, DEFAULTS.videoRenderIntervalMs - elapsed);
+    const wait = Math.max(0, videoRenderIntervalMs - elapsed);
     renderTimerRef.current = window.setTimeout(renderLatestFrame, wait);
-  }, [renderLatestFrame]);
+  }, [renderLatestFrame, videoRenderIntervalMs]);
 
   const connectVideo = useCallback(() => {
     if (socketRef.current) socketRef.current.close();
@@ -275,11 +347,65 @@ function App() {
       setVoices(Array.isArray(voiceJson.voices) ? voiceJson.voices : []);
       setStatus('ready');
       addLog('健康检查完成', { live: liveJson.code, tts: ttsJson.status || ttsJson.provider });
+      if (liveJson?.data?.sessionid) syncTuning(String(liveJson.data.sessionid));
     } catch (error) {
       setStatus('error');
       addLog('健康检查失败', { error: String(error) });
     }
   };
+
+  const applyTuningPayload = useCallback((payload) => {
+    if (!payload?.data) return;
+    const data = payload.data;
+    setTuningInfo(data);
+    if (data.sessionid) setSessionId(String(data.sessionid));
+    if (Array.isArray(data.pads) && data.pads.length >= 4) {
+      setPads({
+        top: Number(data.pads[0]) || 0,
+        bottom: Number(data.pads[1]) || 0,
+        left: Number(data.pads[2]) || 0,
+        right: Number(data.pads[3]) || 0
+      });
+    }
+    window.requestAnimationFrame(updateCanvasBox);
+  }, [updateCanvasBox]);
+
+  const syncTuning = useCallback(async (targetSessionId = sessionId) => {
+    try {
+      const query = targetSessionId ? `?sessionid=${encodeURIComponent(targetSessionId)}` : '';
+      const resp = await fetch(`${normalized.live}/alpha/tuning${query}`);
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'tuning failed');
+      applyTuningPayload(payload);
+      addLog('调试参数已同步', payload.data);
+    } catch (error) {
+      addLog('同步调试参数失败', { error: String(error) });
+    }
+  }, [addLog, applyTuningPayload, normalized.live, sessionId]);
+
+  const updatePads = useCallback(async (nextPads) => {
+    setPads(nextPads);
+    try {
+      const resp = await fetch(`${normalized.live}/alpha/tuning`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionid: sessionId || undefined,
+          pads: [nextPads.top, nextPads.bottom, nextPads.left, nextPads.right]
+        })
+      });
+      const payload = await resp.json();
+      if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'tuning failed');
+      applyTuningPayload(payload);
+    } catch (error) {
+      addLog('更新 pads 失败', { error: String(error) });
+    }
+  }, [addLog, applyTuningPayload, normalized.live, sessionId]);
+
+  const setPadValue = useCallback((key, value) => {
+    const nextPads = { ...pads, [key]: Number.parseInt(value || '0', 10) };
+    updatePads(nextPads);
+  }, [pads, updatePads]);
 
   const createSession = async () => {
     try {
@@ -292,6 +418,7 @@ function App() {
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'session failed');
       setSessionId(String(payload.data.sessionid));
       addLog('alpha session ready', { sessionid: payload.data.sessionid });
+      syncTuning(String(payload.data.sessionid));
     } catch (error) {
       addLog('创建 alpha session 失败', { error: String(error) });
     }
@@ -413,6 +540,83 @@ function App() {
             </label>
           </div>
 
+          <div className="grid2">
+            <label>
+              Max Height
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={videoMaxHeight}
+                onChange={(event) => setVideoMaxHeight(Number.parseInt(event.target.value || '0', 10))}
+              />
+            </label>
+            <label>
+              Video FPS
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={videoPreviewFps}
+                onChange={(event) => setVideoPreviewFps(Number.parseFloat(event.target.value || '0'))}
+              />
+            </label>
+          </div>
+          <label>
+            Render Interval
+            <input
+              type="number"
+              min="16"
+              step="1"
+              value={videoRenderIntervalMs}
+              onChange={(event) => setVideoRenderIntervalMs(Math.max(16, Number.parseInt(event.target.value || '40', 10)))}
+            />
+          </label>
+
+          <div className="tuningPanel">
+            <div className="controlHeader">
+              <span><SlidersHorizontal size={16} />贴回区域</span>
+              <button type="button" className="iconButton" onClick={() => setShowOverlay((value) => !value)}>
+                {showOverlay ? <Eye size={15} /> : <EyeOff size={15} />}
+              </button>
+            </div>
+            <div className="padsGrid">
+              {Object.entries(PAD_LABELS).map(([key, label]) => (
+                <label className="padControl" key={key}>
+                  <span>{label} {pads[key]}</span>
+                  <input
+                    type="range"
+                    min="-120"
+                    max="120"
+                    step="1"
+                    value={pads[key]}
+                    onChange={(event) => setPadValue(key, event.target.value)}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="controlRow">
+              <button type="button" onClick={() => updatePads({ top: 0, bottom: 0, left: 0, right: 0 })}>
+                <RotateCcw size={15} />重置
+              </button>
+              <button type="button" onClick={() => syncTuning()}>
+                <Cable size={15} />同步
+              </button>
+            </div>
+          </div>
+
+          <label>
+            清晰度 {sharpness}
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={sharpness}
+              onChange={(event) => setSharpness(Number.parseInt(event.target.value || '0', 10))}
+            />
+          </label>
+
           <label>
             Prompts
             <input value={prompts} onChange={(event) => setPrompts(event.target.value)} />
@@ -440,8 +644,10 @@ function App() {
             <span>Alpha Video</span>
             <span>{videoState} | {frameInfo.width}x{frameInfo.height} | #{frameInfo.seq} | {frameInfo.fps.toFixed(1)} fps</span>
           </div>
-          <div className="canvasWrap">
-            <canvas ref={canvasRef} />
+          <div className={`canvasWrap ${DEFAULTS.videoFit === 'native' ? 'canvasWrapNative' : ''}`} ref={stageRef}>
+            <canvas ref={canvasRef} style={canvasStyle} />
+            {baseOverlayStyle && <div className="cropOverlay cropOverlayBase" style={baseOverlayStyle} />}
+            {paddedOverlayStyle && <div className="cropOverlay cropOverlayActive" style={paddedOverlayStyle} />}
           </div>
         </div>
 
