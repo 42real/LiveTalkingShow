@@ -260,6 +260,15 @@ def parse_args():
         default=_env_flag("LIVETALKING_ALPHA_OUTPUT", bool(_deep_get(_CONFIG, ["output", "alpha_output"], False))),
         help="enable transparent PNG frame websocket at /alpha/ws",
     )
+    parser.add_argument(
+        "--output_metrics_interval",
+        type=float,
+        default=_env_float(
+            "LIVETALKING_OUTPUT_METRICS_INTERVAL",
+            float(_deep_get(_CONFIG, ["output", "metrics_interval"], 5.0)),
+        ),
+        help="seconds between output pipeline metrics logs; set 0 to disable",
+    )
 
     opt = parser.parse_args()
 

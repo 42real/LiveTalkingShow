@@ -52,3 +52,5 @@ output:
   push_url: "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream"
   # 是否开启 /alpha/ws raw RGBA 透明帧输出。
   alpha_output: true
+  # 输出链路性能日志间隔，单位秒；设为 0 可关闭。
+  metrics_interval: 5

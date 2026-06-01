@@ -84,6 +84,12 @@ class BaseAvatar:
         self.batch_size = opt.batch_size
         self.res_frame_queue = Queue(self.batch_size*2)
         self.render_event = Event()
+        self._process_metrics_last = time.perf_counter()
+        self._process_metrics_frames = 0
+        self._process_metrics_paste_ms = 0.0
+        self._process_metrics_output_ms = 0.0
+        self._process_metrics_max_paste_ms = 0.0
+        self._process_metrics_max_output_ms = 0.0
 
         _tts_modules = {
             'edgetts': 'tts.edge',
@@ -105,22 +111,9 @@ class BaseAvatar:
         else:
             logger.error(f"TTS module {opt.tts} not found.")
 
-        _output_modules = {
-            'webrtc': 'streamout.webrtc',
-            'rtcpush': 'streamout.webrtc',
-            'rtmp': 'streamout.rtmp',
-            'virtualcam': 'streamout.virtualcam'
-        }
-
-        # 初始化 Output 模块
-        if opt.transport in _output_modules:
-            try:
-                importlib.import_module(_output_modules[opt.transport])
-                self.output = registry.create("streamout", opt.transport, opt=opt, parent=self)
-            except ModuleNotFoundError:
-                logger.error(f"Output transport module {_output_modules[opt.transport]} not found.")
-        else:
-            logger.error(f"Output transport {opt.transport} not found in map.")
+        # 初始化统一输出路由。具体传输方式由 OutputRouter 分发到对应 sink。
+        from streamout.router import OutputRouter
+        self.output = OutputRouter(opt=opt, parent=self)
 
     # 如果系统没有使用 pipeline，或者为了向后兼容原来的 ttsreal.py
     def put_msg_txt(self, msg, datainfo:dict={}):
@@ -421,7 +414,11 @@ class BaseAvatar:
             else:
                 self.speaking = True
                 try:
+                    paste_start = time.perf_counter()
                     current_frame = self.paste_back_frame(res_frame,idx)
+                    paste_ms = (time.perf_counter() - paste_start) * 1000
+                    self._process_metrics_paste_ms += paste_ms
+                    self._process_metrics_max_paste_ms = max(self._process_metrics_max_paste_ms, paste_ms)
                 except Exception as e:
                     logger.warning(f"paste_back_frame error: {e}")
                     continue
@@ -441,7 +438,13 @@ class BaseAvatar:
                 cv2.putText(combine_frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
             
             # 使用统一输出接口推送视频帧
+            output_start = time.perf_counter()
             self.output.push_video_frame(combine_frame)
+            output_ms = (time.perf_counter() - output_start) * 1000
+            self._process_metrics_output_ms += output_ms
+            self._process_metrics_max_output_ms = max(self._process_metrics_max_output_ms, output_ms)
+            self._process_metrics_frames += 1
+            self._log_process_metrics(combine_frame)
             self.record_video_data(combine_frame)
 
             for audio_frame in audio_frames:
@@ -457,6 +460,31 @@ class BaseAvatar:
 
         self.output.stop()
         logger.info('baseavatar process_frames thread stop') 
+
+    def _log_process_metrics(self, frame):
+        interval = time.perf_counter() - self._process_metrics_last
+        if interval < float(getattr(self.opt, "output_metrics_interval", 5.0) or 5.0):
+            return
+        frames = max(1, self._process_metrics_frames)
+        logger.info(
+            "avatar process metrics fps=%.1f avg_paste_ms=%.2f max_paste_ms=%.2f "
+            "avg_output_ms=%.2f max_output_ms=%.2f res_queue=%d shape=%s dtype=%s speaking=%s",
+            self._process_metrics_frames / interval if interval > 0 else 0.0,
+            self._process_metrics_paste_ms / frames,
+            self._process_metrics_max_paste_ms,
+            self._process_metrics_output_ms / frames,
+            self._process_metrics_max_output_ms,
+            self.res_frame_queue.qsize(),
+            getattr(frame, "shape", None),
+            getattr(frame, "dtype", None),
+            self.speaking,
+        )
+        self._process_metrics_last = time.perf_counter()
+        self._process_metrics_frames = 0
+        self._process_metrics_paste_ms = 0.0
+        self._process_metrics_output_ms = 0.0
+        self._process_metrics_max_paste_ms = 0.0
+        self._process_metrics_max_output_ms = 0.0
 
     def render(self,quit_event):
         self.quit_event = quit_event

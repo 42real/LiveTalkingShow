@@ -26,6 +26,7 @@ class WebRTCOutput(BaseOutput):
         self._alpha_video_count = 0
         self._alpha_audio_count = 0
         self._alpha_audio_bytes = 0
+        self._alpha_video_pace_sleep_ms = 0.0
         self._alpha_last_video_shape = None
         self._alpha_last_video_log = 0.0
         self._alpha_last_video_count = 0
@@ -76,7 +77,9 @@ class WebRTCOutput(BaseOutput):
         if self._alpha_next_frame_time is None:
             self._alpha_next_frame_time = now
         elif self._alpha_next_frame_time > now:
-            time.sleep(self._alpha_next_frame_time - now)
+            sleep_seconds = self._alpha_next_frame_time - now
+            time.sleep(sleep_seconds)
+            self._alpha_video_pace_sleep_ms += sleep_seconds * 1000
             now = time.perf_counter()
         elif now - self._alpha_next_frame_time > frame_interval:
             self._alpha_next_frame_time = now
@@ -98,12 +101,14 @@ class WebRTCOutput(BaseOutput):
         frame_delta = self._alpha_video_count - self._alpha_last_video_count
         fps = frame_delta / interval if interval > 0 else 0.0
         logger.info(
-            "streamout alpha video frame count=%d shape=%s dtype=%s fps=%.1f",
+            "streamout alpha video frame count=%d shape=%s dtype=%s fps=%.1f avg_pace_sleep_ms=%.2f",
             self._alpha_video_count,
             shape,
             dtype,
             fps,
+            self._alpha_video_pace_sleep_ms / max(1, frame_delta),
         )
+        self._alpha_video_pace_sleep_ms = 0.0
         self._alpha_last_video_shape = shape_key
         self._alpha_last_video_log = now
         self._alpha_last_video_count = self._alpha_video_count

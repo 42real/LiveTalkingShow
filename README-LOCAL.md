@@ -57,6 +57,7 @@ LiveTalking 主服务最常用配置：
 | `ROBOTTTS_MODE` | `tts.robottts_mode` | `instruct2` | LiveTalking -> TTS | 透传给 TTS 服务的模式。测试后端支持 `instruct2` / `zero-shot`。 |
 | `LIVETALKING_TRANSPORT` | `output.transport` | `webrtc` | LiveTalking | 输出模块名。必须是 `webrtc` / `rtmp` / `rtcpush` / `virtualcam`；`alpha` 不是合法 transport。 |
 | `LIVETALKING_ALPHA_OUTPUT` | `output.alpha_output` | `1` | LiveTalking | 是否发布 `/alpha/ws`、`/alpha/audio`、`/alpha/input/audio`。桌面助手必须开启。 |
+| `LIVETALKING_OUTPUT_METRICS_INTERVAL` | `output.metrics_interval` | `5` | LiveTalking | 统一输出链路性能日志间隔，单位秒；设为 `0` 可关闭。日志包含输出 fps、贴图耗时、sink 耗时、alpha 转换/打包耗时、队列情况。 |
 
 端口联动规则：
 

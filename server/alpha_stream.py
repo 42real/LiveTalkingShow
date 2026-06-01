@@ -50,6 +50,11 @@ class LatestFrameHub:
         self._last_log_time = 0.0
         self._last_log_seq = 0
         self._dropped_packets = 0
+        self._convert_ms = 0.0
+        self._resize_ms = 0.0
+        self._packet_ms = 0.0
+        self._send_schedule_ms = 0.0
+        self._packet_bytes = 0
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -131,15 +136,31 @@ class LatestFrameHub:
         full_packet = None
         for client in send_clients:
             if client.max_width or client.max_height:
+                resize_start = time.perf_counter()
                 client_frame = self._resize_for_client(frame, client)
-                client_packet = self._make_packet(self._to_rgba(client_frame), seq)
+                self._resize_ms += (time.perf_counter() - resize_start) * 1000
+                convert_start = time.perf_counter()
+                rgba = self._to_rgba(client_frame)
+                self._convert_ms += (time.perf_counter() - convert_start) * 1000
+                packet_start = time.perf_counter()
+                client_packet = self._make_packet(rgba, seq)
+                self._packet_ms += (time.perf_counter() - packet_start) * 1000
+                self._packet_bytes += len(client_packet)
             else:
                 if full_packet is None:
-                    full_packet = self._make_packet(self._to_rgba(frame), seq)
+                    convert_start = time.perf_counter()
+                    rgba = self._to_rgba(frame)
+                    self._convert_ms += (time.perf_counter() - convert_start) * 1000
+                    packet_start = time.perf_counter()
+                    full_packet = self._make_packet(rgba, seq)
+                    self._packet_ms += (time.perf_counter() - packet_start) * 1000
+                    self._packet_bytes += len(full_packet)
                     with self._lock:
                         self._last_packet = full_packet
                 client_packet = full_packet
+            schedule_start = time.perf_counter()
             loop.call_soon_threadsafe(self._replace_latest, client.queue, client_packet)
+            self._send_schedule_ms += (time.perf_counter() - schedule_start) * 1000
 
     def _to_rgba(self, frame: np.ndarray) -> np.ndarray:
         if not frame.flags["C_CONTIGUOUS"]:
@@ -224,7 +245,8 @@ class LatestFrameHub:
         frame_delta = self._seq - self._last_log_seq
         fps = frame_delta / interval if interval > 0 else 0.0
         logger.info(
-            "alpha frame publish seq=%d size=%dx%d dtype=%s clients=%d fps=%.1f queue_drop=%d",
+            "alpha frame publish seq=%d size=%dx%d dtype=%s clients=%d fps=%.1f queue_drop=%d "
+            "avg_resize_ms=%.2f avg_convert_ms=%.2f avg_packet_ms=%.2f avg_schedule_ms=%.2f avg_packet_mb=%.2f",
             self._seq,
             width,
             height,
@@ -232,11 +254,21 @@ class LatestFrameHub:
             client_count,
             fps,
             self._dropped_packets,
+            self._resize_ms / max(1, frame_delta),
+            self._convert_ms / max(1, frame_delta),
+            self._packet_ms / max(1, frame_delta),
+            self._send_schedule_ms / max(1, frame_delta),
+            (self._packet_bytes / max(1, frame_delta)) / (1024 * 1024),
         )
         self._last_shape = shape
         self._last_log_time = now
         self._last_log_seq = self._seq
         self._dropped_packets = 0
+        self._convert_ms = 0.0
+        self._resize_ms = 0.0
+        self._packet_ms = 0.0
+        self._send_schedule_ms = 0.0
+        self._packet_bytes = 0
 
 
 class AudioHub:
