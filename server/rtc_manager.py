@@ -201,6 +201,104 @@ class RTCManager:
             }),
         )
 
+    async def handle_packed_alpha_offer(self, request):
+        """Handle transparent-display WebRTC using one packed video track."""
+        params = await request.json()
+        offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+        sessionid = await session_manager.create_session(params)
+        logger.info("packed alpha webrtc offer sessionid=%s param_keys=%s", sessionid, sorted(params.keys()))
+        avatar_session = session_manager.get_session(sessionid)
+
+        ice_server = RTCIceServer(urls="stun:stun.freeswitch.org:3478")
+        pc = RTCPeerConnection(
+            configuration=RTCConfiguration(
+                iceServers=[ice_server],
+                bundlePolicy=RTCBundlePolicy.MAX_BUNDLE,
+            )
+        )
+        self.pcs.add(pc)
+
+        from server.alpha_webrtc import PackedAlphaWebRTCPlayer
+
+        player = PackedAlphaWebRTCPlayer(avatar_session)
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            logger.info("Packed alpha WebRTC connection state is %s", pc.connectionState)
+            if pc.connectionState in ("failed", "closed"):
+                player.stop_worker()
+                await pc.close()
+                self.pcs.discard(pc)
+                session_manager.remove_session(sessionid)
+
+        await pc.setRemoteDescription(offer)
+
+        send_tracks = [player.audio, player.packed_video]
+        offered_transceivers = [
+            transceiver
+            for transceiver in pc.getTransceivers()
+            if transceiver.sender.track is None and transceiver.kind in ("audio", "video")
+        ]
+        if len(offered_transceivers) < len(send_tracks):
+            player.stop_worker()
+            await pc.close()
+            self.pcs.discard(pc)
+            session_manager.remove_session(sessionid)
+            return web.Response(
+                status=400,
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "offer must contain audio + one video recvonly m-line"}),
+            )
+
+        for transceiver, track in zip(offered_transceivers, send_tracks):
+            if transceiver.kind != track.kind:
+                player.stop_worker()
+                await pc.close()
+                self.pcs.discard(pc)
+                session_manager.remove_session(sessionid)
+                return web.Response(
+                    status=400,
+                    content_type="application/json",
+                    text=json.dumps({
+                        "code": -1,
+                        "msg": "offer m-line order must be audio, video",
+                    }),
+                )
+            transceiver.sender.replaceTrack(track)
+            transceiver.direction = "sendonly"
+            logger.info(
+                "packed alpha webrtc bound track kind=%s mid=%s track_id=%s",
+                track.kind,
+                transceiver.mid,
+                track.id,
+            )
+
+        capabilities = RTCRtpSender.getCapabilities("video")
+        preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
+        preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
+        preferences += list(filter(lambda x: x.name == "rtx", capabilities.codecs))
+        for transceiver in offered_transceivers:
+            if transceiver.kind == "video" and preferences:
+                transceiver.setCodecPreferences(preferences)
+
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({
+                "sdp": pc.localDescription.sdp,
+                "type": pc.localDescription.type,
+                "sessionid": sessionid,
+                "tracks": {
+                    "audio": "audio",
+                    "packed": "video-0",
+                    "packing": "left=color,right=alpha",
+                },
+            }),
+        )
+
     async def handle_rtcpush(self, push_url, sessionid: str):
         """RTCPush 模式：主动推流"""
         import aiohttp

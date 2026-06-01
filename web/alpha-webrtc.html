@@ -205,6 +205,7 @@
         <span>视频尺寸</span><span id="size">-</span>
         <span>渲染 FPS</span><span id="fps">0</span>
         <span>视频轨</span><span id="tracks">0</span>
+        <span>模式</span><span id="mode">packed</span>
       </div>
       <div id="log" class="log"></div>
     </aside>
@@ -221,6 +222,7 @@
     const sizeText = document.getElementById('size');
     const fpsText = document.getElementById('fps');
     const tracksText = document.getElementById('tracks');
+    const modeText = document.getElementById('mode');
     const logText = document.getElementById('log');
     const canvas = document.getElementById('canvas');
     const audioElement = document.getElementById('audio');
@@ -233,6 +235,7 @@
     let frameCount = 0;
     let fpsLastAt = performance.now();
     let webgl = null;
+    let packedMode = true;
 
     function log(message, data) {
       const suffix = data === undefined ? '' : ` ${JSON.stringify(data)}`;
@@ -265,9 +268,11 @@
       tracksText.textContent = '0';
 
       pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan', bundlePolicy: 'max-bundle' });
+      packedMode = new URLSearchParams(window.location.search).get('mode') !== 'dual';
+      modeText.textContent = packedMode ? 'packed' : 'dual';
       pc.addTransceiver('audio', { direction: 'recvonly' });
       const colorTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
-      const alphaTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+      const alphaTransceiver = packedMode ? null : pc.addTransceiver('video', { direction: 'recvonly' });
 
       pc.addEventListener('connectionstatechange', () => {
         setStatus(pc.connectionState);
@@ -284,14 +289,14 @@
 
         videoTrackCount += 1;
         tracksText.textContent = String(videoTrackCount);
-        const isAlpha = event.transceiver === alphaTransceiver;
+        const isAlpha = !packedMode && event.transceiver === alphaTransceiver;
         const target = isAlpha ? alphaVideo : colorVideo;
         target.srcObject = new MediaStream([event.track]);
         target.play().catch((error) => log('video play blocked', { error: String(error) }));
-        log(isAlpha ? 'alpha video track received' : 'color video track received', {
+        log(packedMode ? 'packed video track received' : (isAlpha ? 'alpha video track received' : 'color video track received'), {
           id: event.track.id,
           mid: event.transceiver?.mid || '',
-          expected: event.transceiver === colorTransceiver ? 'color' : 'alpha',
+          expected: packedMode ? 'packed' : (event.transceiver === colorTransceiver ? 'color' : 'alpha'),
         });
       });
 
@@ -299,7 +304,7 @@
       await pc.setLocalDescription(offer);
       await waitIceComplete(pc);
 
-      const response = await fetch('/alpha/webrtc/offer', {
+      const response = await fetch(packedMode ? '/alpha/webrtc/packed_offer' : '/alpha/webrtc/offer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(pc.localDescription),
@@ -403,9 +408,19 @@
         varying vec2 vTexCoord;
         uniform sampler2D uColor;
         uniform sampler2D uAlpha;
+        uniform int uPacked;
         void main() {
-          vec4 color = texture2D(uColor, vTexCoord);
-          float alpha = texture2D(uAlpha, vTexCoord).r;
+          vec4 color;
+          float alpha;
+          if (uPacked == 1) {
+            vec2 colorCoord = vec2(vTexCoord.x * 0.5, vTexCoord.y);
+            vec2 alphaCoord = vec2(0.5 + vTexCoord.x * 0.5, vTexCoord.y);
+            color = texture2D(uColor, colorCoord);
+            alpha = texture2D(uColor, alphaCoord).r;
+          } else {
+            color = texture2D(uColor, vTexCoord);
+            alpha = texture2D(uAlpha, vTexCoord).r;
+          }
           gl_FragColor = vec4(color.rgb, alpha);
         }
       `;
@@ -433,9 +448,10 @@
       const alphaTexture = createTexture(gl, 1);
       gl.uniform1i(gl.getUniformLocation(program, 'uColor'), 0);
       gl.uniform1i(gl.getUniformLocation(program, 'uAlpha'), 1);
+      const packedUniform = gl.getUniformLocation(program, 'uPacked');
       gl.clearColor(0, 0, 0, 0);
 
-      return { gl, colorTexture, alphaTexture };
+      return { gl, colorTexture, alphaTexture, packedUniform };
     }
 
     function createShader(gl, type, source) {
@@ -475,24 +491,29 @@
       webgl = webgl || initWebGL();
       const render = () => {
         renderHandle = requestAnimationFrame(render);
-        if (colorVideo.readyState < 2 || alphaVideo.readyState < 2) return;
+        if (colorVideo.readyState < 2) return;
+        if (!packedMode && alphaVideo.readyState < 2) return;
 
-        const width = colorVideo.videoWidth || 640;
+        const sourceWidth = colorVideo.videoWidth || 640;
         const height = colorVideo.videoHeight || 360;
+        const width = packedMode ? Math.max(1, Math.floor(sourceWidth / 2)) : sourceWidth;
         if (canvas.width !== width || canvas.height !== height) {
           canvas.width = width;
           canvas.height = height;
           sizeText.textContent = `${width}x${height}`;
         }
 
-        const { gl, colorTexture, alphaTexture } = webgl;
+        const { gl, colorTexture, alphaTexture, packedUniform } = webgl;
         gl.viewport(0, 0, canvas.width, canvas.height);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, colorTexture);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, colorVideo);
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_2D, alphaTexture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, alphaVideo);
+        gl.uniform1i(packedUniform, packedMode ? 1 : 0);
+        if (!packedMode) {
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, alphaTexture);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, alphaVideo);
+        }
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 

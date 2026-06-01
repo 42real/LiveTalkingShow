@@ -227,3 +227,63 @@ class AlphaWebRTCPlayer:
         elif now - self.__next_frame_at > interval:
             self.__next_frame_at = now
         self.__next_frame_at += interval
+
+
+class PackedAlphaWebRTCPlayer(AlphaWebRTCPlayer):
+    """Two-track WebRTC player with color and alpha packed into one video frame.
+
+    The output video frame is width * 2:
+    - left half: BGR color image
+    - right half: grayscale alpha mask encoded as BGR
+
+    Packing color and alpha in one video track keeps them frame-synchronous in
+    browsers because both halves are decoded from the same RTP frame.
+    """
+
+    def __init__(self, avatar_session, manage_worker: bool = True):
+        super().__init__(avatar_session, manage_worker=manage_worker)
+        self.__packed_video = PlayerStreamTrack(self, kind="video")
+        self.__video_count = 0
+        self.__last_log = 0.0
+        self.__pack_ms = 0.0
+
+    @property
+    def packed_video(self) -> MediaStreamTrack:
+        return self.__packed_video
+
+    def push_video(self, frame) -> None:
+        self._pace_video()
+        start = time.perf_counter()
+        color_frame, alpha_frame = self._split_frame(frame)
+        packed_frame = np.concatenate((color_frame, alpha_frame), axis=1)
+        if not packed_frame.flags["C_CONTIGUOUS"]:
+            packed_frame = np.ascontiguousarray(packed_frame)
+        self.__pack_ms += (time.perf_counter() - start) * 1000
+        self.__video_count += 1
+
+        video = VideoFrame.from_ndarray(packed_frame, format="bgr24")
+        self._replace_latest(self.__packed_video._queue, video)
+        self._log_packed_video(frame, packed_frame)
+
+    def get_buffer_size(self) -> int:
+        return self.__packed_video._queue.qsize()
+
+    def _log_packed_video(self, source_frame, packed_frame) -> None:
+        now = time.perf_counter()
+        if self.__video_count != 1 and now - self.__last_log < 5.0:
+            return
+        interval = now - self.__last_log if self.__last_log else 0.0
+        fps = 0.0 if interval <= 0 else self.__video_count / interval
+        logger.info(
+            "packed alpha webrtc video frames=%d approx_fps=%.1f source_shape=%s "
+            "packed_shape=%s queue=%d avg_pack_ms=%.2f",
+            self.__video_count,
+            fps,
+            getattr(source_frame, "shape", None),
+            getattr(packed_frame, "shape", None),
+            self.__packed_video._queue.qsize(),
+            self.__pack_ms / max(1, self.__video_count),
+        )
+        self.__video_count = 0
+        self.__pack_ms = 0.0
+        self.__last_log = now

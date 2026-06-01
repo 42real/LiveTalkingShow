@@ -105,6 +105,9 @@ async def offer(request):
 async def alpha_webrtc_offer(request):
     return await rtc_manager.handle_alpha_offer(request)
 
+async def packed_alpha_webrtc_offer(request):
+    return await rtc_manager.handle_packed_alpha_offer(request)
+
 async def on_shutdown(app):
     await rtc_manager.shutdown()
 
@@ -175,6 +178,7 @@ def main():
     appasync.on_shutdown.append(on_shutdown)
     appasync.router.add_post("/offer", offer)
     appasync.router.add_post("/alpha/webrtc/offer", alpha_webrtc_offer)
+    appasync.router.add_post("/alpha/webrtc/packed_offer", packed_alpha_webrtc_offer)
     appasync.router.add_get("/record/{sessionid}", download_record)
     
     # 注册 server/routes.py 中的通用 API 路由

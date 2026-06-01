@@ -444,7 +444,8 @@ http://127.0.0.1:8050
 | `WS` | `/alpha/input/audio` | 外部 TTS -> LiveTalking | 输入外部 PCM 音频流，绕过 LiveTalking 内部 TTS。 |
 | `WS` | `/alpha/ws` | 显示端 <- LiveTalking | 输出 raw RGBA 视频帧。 |
 | `WS` | `/alpha/audio` | 显示端 <- LiveTalking | 输出 LiveTalking 侧音频 PCM16。 |
-| `POST` | `/alpha/webrtc/offer` | 远程透明显示端 -> LiveTalking | 实验性双轨 WebRTC：音频 + 彩色视频轨 + alpha mask 视频轨。 |
+| `POST` | `/alpha/webrtc/packed_offer` | 远程透明显示端 -> LiveTalking | 推荐远程透明 WebRTC：音频 + packed 视频轨，单帧左半 color、右半 alpha。 |
+| `POST` | `/alpha/webrtc/offer` | 远程透明显示端 -> LiveTalking | 实验性双轨 WebRTC：音频 + 彩色视频轨 + alpha mask 视频轨。存在跨轨同步风险。 |
 | `POST` | `/alpha/close` | 显示端/控制端 -> LiveTalking | 关闭 alpha session。 |
 | `POST` | `/interrupt_talk` | 控制端 -> LiveTalking | 打断当前朗读。 |
 | `POST` | `/is_speaking` | 控制端 -> LiveTalking | 查询 session 是否正在说话。 |
@@ -638,15 +639,14 @@ WebSocket binary PCM16 chunks，16kHz mono
 
 ### 4.6 远程透明 WebRTC 输出
 
-`/alpha/ws` 的 raw RGBA 很适合同机 overlay，但跨机器时带宽会很大；`jpeg` 又会丢透明。当前分支新增一个实验性远程透明输出：
+`/alpha/ws` 的 raw RGBA 很适合同机 overlay，但跨机器时带宽会很大；`jpeg` 又会丢透明。远程透明显示推荐使用 packed WebRTC：
 
 ```text
 浏览器/显示端
-  -> POST /alpha/webrtc/offer
+  -> POST /alpha/webrtc/packed_offer
   <- WebRTC audio track
-  <- WebRTC color video track
-  <- WebRTC alpha-mask video track
-  -> 本地 WebGL/canvas 合成透明画面
+  <- WebRTC packed video track
+  -> 本地 WebGL/canvas 从同一帧左半取 color、右半取 alpha，再合成透明画面
 ```
 
 打开内置测试页：
@@ -655,7 +655,7 @@ WebSocket binary PCM16 chunks，16kHz mono
 http://127.0.0.1:8050/alpha-webrtc.html
 ```
 
-这个页面连接后会创建一个独立 session，并显示三类信息：音频轨、彩色视频轨、alpha 视频轨。点击“朗读”会向同一个 session 调 `/alpha/speak`。
+这个页面连接后会创建一个独立 session。默认 packed 模式只需要一条视频轨，因此 color 和 alpha 不会出现跨轨不同步。点击“朗读”会向同一个 session 调 `/alpha/speak`。
 
 双轨 WebRTC 的特点：
 
@@ -664,11 +664,12 @@ http://127.0.0.1:8050/alpha-webrtc.html
 | `/alpha/ws?format=raw` | 是 | 带宽最高，本机低延时 | 同机 Electron 透明置顶窗口。 |
 | `/alpha/ws?format=jpeg` | 否 | 带宽低，CPU 低 | 远程预览、调试画面尺寸和帧率。 |
 | `/alpha/ws?format=webp/png` | 是 | 带宽较低，但服务端 CPU 编码重 | 临时检查透明，不建议长期高帧率运行。 |
-| `/alpha/webrtc/offer` 双轨 | 是 | 走浏览器视频编解码，远程更合理 | 跨机器透明显示、浏览器端合成、后续远程桌面助手。 |
+| `/alpha/webrtc/packed_offer` packed 单轨 | 是 | 走浏览器视频编解码，color/alpha 同帧同步 | 跨机器透明显示、浏览器端合成、后续远程桌面助手。 |
+| `/alpha/webrtc/offer` 双轨 | 是 | 两条视频轨可能解码不同步 | 仅用于对照测试，不建议作为默认显示方案。 |
 
-注意：WebRTC 不支持直接传 RGBA 视频。这里把一帧拆成两路普通视频：一路是 BGR/RGB 彩色画面，一路是灰度 alpha mask。显示端必须把两路按帧合成；当前测试页用 WebGL shader 合成。后续如果要做生产显示端，可以沿用这个协议，把合成逻辑放到 Electron、浏览器或原生窗口里。
+注意：WebRTC 不支持直接传 RGBA 视频。packed 模式把一帧拆成左右两半后放进同一个普通视频帧：左半是 BGR/RGB 彩色画面，右半是灰度 alpha mask。显示端必须在 shader/canvas 里把左右半帧重新合成。
 
-客户端创建 `RTCPeerConnection` 时建议使用 `bundlePolicy: "max-bundle"`，并按顺序创建 `audio recvonly`、`video recvonly`、`video recvonly` 三个 transceiver。这个顺序对应服务端返回的音频、彩色画面、alpha mask 三条轨。
+packed 客户端创建 `RTCPeerConnection` 时建议使用 `bundlePolicy: "max-bundle"`，并按顺序创建 `audio recvonly`、`video recvonly` 两个 transceiver。旧双轨模式需要 `audio recvonly`、`video recvonly`、`video recvonly`，但不作为默认方案。
 
 ## 5. 测试客户端
 
