@@ -10,7 +10,7 @@ LiveTalking 主服务使用仓库根目录的 `uv` 环境；`testclient/backend`
 - `web/`：浏览器可视化测试页面，可发文本、启动 TTS task、查看 alpha 视频帧并播放 alpha 音频输出。
 - `overlay/`：Electron 透明置顶显示窗口，用于模拟桌面助手显示。
 
-默认显示链路是 alpha stream。LiveTalking 主服务默认开启 `LIVETALKING_ALPHA_OUTPUT=1`，Web 测试页打开后会自动创建 alpha session 并连接 `/alpha/ws`，overlay 也只连接 `/alpha/ws` 显示视频。官方 WebRTC 页面仍可用，但不是 testclient 的默认显示方式。
+默认显示链路是 alpha stream。LiveTalking 主服务默认开启 `LIVETALKING_ALPHA_OUTPUT=1`，Web 测试页打开后会自动创建 alpha session 并连接 `/alpha/ws`，overlay 也只连接 `/alpha/ws` 显示视频。Web 测试页默认用 JPEG 压缩预览以降低远程显示压力；overlay 默认用 raw RGBA 保留透明通道。官方 WebRTC 页面仍可用，但不是 testclient 的默认显示方式。
 
 根目录 `.env.example` 只用于 `testclient`，不要把这里的变量混到 LiveTalking 主仓库 `.env.example`。
 
@@ -256,7 +256,7 @@ testclient/web 或控制端
   -> WS ws://127.0.0.1:8036/tts/ws
   -> TTS 返回 PCM16 binary chunks
   -> LiveTalking 驱动 avatar 推理
-  -> /alpha/ws 输出 RGBA 视频
+  -> /alpha/ws 输出视频，raw RGBA / JPEG / PNG / WebP 可选
 ```
 
 外部 TTS 主动推音频时：
@@ -267,7 +267,7 @@ testclient/web 或控制端
   -> testclient/backend 连接 ws://127.0.0.1:8050/alpha/input/audio
   -> 推送 PCM16 binary chunks
   -> LiveTalking 驱动 avatar 推理
-  -> /alpha/ws 输出 RGBA 视频
+  -> /alpha/ws 输出视频，raw RGBA / JPEG / PNG / WebP 可选
 ```
 
 ## 4. 启动可视化 Web 客户端
@@ -292,7 +292,7 @@ Web 页面按钮和接口对应关系：
 | 创建 session | `POST <LiveTalking>/alpha/session` | JSON，通常 `{ "reuse": true }`。 |
 | `alpha/speak` | `POST <LiveTalking>/alpha/speak` | JSON 文本和 TTS 参数。 |
 | TTS task | `POST <TTS>/tts/task/start` | JSON task，包含 `target_hardware`。 |
-| 视频 | `WS <LiveTalking>/alpha/ws?max_height=720&fps=8` | binary，24 字节 header + RGBA8。 |
+| 视频 | `WS <LiveTalking>/alpha/ws?max_height=720&fps=25&format=jpeg&quality=80` | binary，24 字节 header + payload。Web 默认 JPEG；overlay 默认 raw RGBA。 |
 | 音频 | `WS <LiveTalking>/alpha/audio` | binary，PCM16。 |
 | 中断 | `POST <LiveTalking>/interrupt_talk` | JSON sessionid。 |
 | 关闭 | `POST <LiveTalking>/alpha/close` | JSON sessionid。 |
@@ -315,12 +315,12 @@ Web 页面按钮和接口对应关系：
 Web 预览默认连接：
 
 ```text
-ws://127.0.0.1:8050/alpha/ws?max_height=720&fps=8
+ws://127.0.0.1:8050/alpha/ws?max_height=720&fps=25&format=jpeg&quality=80
 ```
 
 打开 Web 页面时会自动创建 alpha session 并连接上面的 alpha stream。`VITE_ALPHA_AUTO_CONNECT=0` 可关闭自动连接。
 
-这是为了避免浏览器直接处理高分辨率 raw RGBA 帧导致卡顿。这个缩放只影响当前 Web 客户端，不改变 LiveTalking 原始输出，也不改变 overlay 的显示尺寸。
+这是为了避免浏览器直接处理高分辨率 raw RGBA 帧导致卡顿。这个缩放和编码只影响当前 Web 客户端，不改变 LiveTalking 原始输出，也不改变 overlay 的显示尺寸。需要检查透明通道时把 `format` 改为 `raw` 或 `webp`。
 
 ### 4.1 Web 配置
 
@@ -333,8 +333,10 @@ ws://127.0.0.1:8050/alpha/ws?max_height=720&fps=8
 | `VITE_ALPHA_INPUT_WS` | WebSocket 地址 | `ws://127.0.0.1:8050/alpha/input/audio` | TTS task 推流目标。端口必须和 LiveTalking 一致。 |
 | `VITE_ALPHA_AUDIO_SAMPLE_RATE` | 正整数 | `16000` | 浏览器播放 `/alpha/audio` 时使用的采样率。 |
 | `VITE_ALPHA_VIDEO_MAX_HEIGHT` | 非负整数 px | `720` | Web 预览请求 `/alpha/ws` 的最大高度，`0` 表示不限制。 |
-| `VITE_ALPHA_VIDEO_FPS` | 非负数 | `8` | Web 预览请求 `/alpha/ws` 的帧率，`0` 表示不限制。 |
-| `VITE_VIDEO_RENDER_INTERVAL_MS` | 非负整数 ms | `125` | 浏览器 canvas 渲染限频。按钮卡顿时可调大。 |
+| `VITE_ALPHA_VIDEO_FPS` | 非负数 | `25` | Web 预览请求 `/alpha/ws` 的帧率，`0` 表示不限制。 |
+| `VITE_ALPHA_VIDEO_FORMAT` | `jpeg` / `raw` / `png` / `webp` | `jpeg` | Web 预览视频编码。`jpeg` 最流畅但无透明；`raw/webp/png` 可用于检查透明。 |
+| `VITE_ALPHA_VIDEO_QUALITY` | `1-100` | `80` | `jpeg` / `webp` 编码质量。越高越清晰，带宽/CPU 越高。 |
+| `VITE_VIDEO_RENDER_INTERVAL_MS` | 非负整数 ms | `40` | 浏览器 canvas 渲染限频。`40` 约 25fps；远程卡顿可调到 `67`。 |
 | `VITE_ALPHA_AUTO_CONNECT` | `1/0` | `1` | 页面打开后是否自动创建 alpha session 并连接视频。 |
 | `VITE_DEFAULT_TEXT` | 字符串 | 示例文本 | 页面输入框默认文本。 |
 | `VITE_DEFAULT_PROMPTS` | 字符串 | 示例提示词 | 页面 TTS prompts 默认值。 |
@@ -365,7 +367,7 @@ overlay
 `/alpha/ws` 每条 binary message：
 
 ```text
-24 byte header + width * height * 4 RGBA bytes
+24 byte header + payload
 ```
 
 header 字段：
@@ -373,12 +375,14 @@ header 字段：
 ```text
 magic:   4 bytes, 固定 LTAF
 version: 1 byte, 当前 1
-format:  1 byte, 当前 1 表示 RGBA8
+format:  1 byte, 1=raw RGBA8, 2=JPEG, 3=PNG, 4=WebP
 flags:   2 bytes, 当前 0
 width:   uint32 little-endian
 height:  uint32 little-endian
 seq:     uint64 little-endian
 ```
+
+`raw` payload 是 `width * height * 4` 的 RGBA 像素。`jpeg/png/webp` payload 是对应图片字节；其中 `jpeg` 不保留透明，`png/webp` 可以保留透明。
 
 overlay 显示尺寸来自 `width/height`，也就是当前 avatar 的 `full_imgs` 原始画布。控制条里的缩放只改变桌面显示比例，不裁剪、不改 LiveTalking 输出帧。
 
@@ -389,9 +393,11 @@ overlay 显示尺寸来自 `width/height`，也就是当前 avatar 的 `full_img
 ```bash
 LIVETALKING_VIDEO_MAX_HEIGHT=1080
 LIVETALKING_VIDEO_FPS=15
+LIVETALKING_VIDEO_FORMAT=raw
+LIVETALKING_VIDEO_QUALITY=80
 ```
 
-这会让 overlay 连接 `/alpha/ws?max_height=1080&fps=15`。它只降低传输和显示压力，不会改 avatar 原图；如果仍卡，可以降到 `720/12`。如果必须无损显示原始帧，把这两个值设为 `0`。
+这会让 overlay 连接 `/alpha/ws?max_height=1080&fps=15&format=raw&quality=80`。它只降低传输和显示压力，不会改 avatar 原图；如果仍卡，可以降到 `720/12/raw`。如果必须无损显示原始帧，把尺寸和帧率限制设为 `0`。
 
 ### 5.1 Overlay 配置
 
@@ -409,6 +415,8 @@ LIVETALKING_VIDEO_FPS=15
 | `LIVETALKING_VIDEO_MAX_WIDTH` | 非负整数 px | `0` | overlay 请求 alpha stream 的最大宽度，`0` 表示不限制。 |
 | `LIVETALKING_VIDEO_MAX_HEIGHT` | 非负整数 px | `1080` | overlay 请求 alpha stream 的最大高度，`0` 表示不限制。 |
 | `LIVETALKING_VIDEO_FPS` | 非负数 | `15` | overlay 请求 alpha stream 的帧率，`0` 表示不限制。 |
+| `LIVETALKING_VIDEO_FORMAT` | `raw` / `webp` / `png` / `jpeg` | `raw` | overlay 请求 alpha stream 的编码。透明桌面助手推荐 `raw`；远程透明可试 `webp`；`jpeg` 没有透明。 |
+| `LIVETALKING_VIDEO_QUALITY` | `1-100` | `80` | `jpeg` / `webp` 编码质量。 |
 | `LIVETALKING_X` / `LIVETALKING_Y` | 屏幕坐标 | 空 | 初始窗口位置。 |
 | `LIVETALKING_EXTRA_PATH` | PATH 片段 | 空 | 需要指定额外 node/npm/electron 路径时使用。 |
 

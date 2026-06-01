@@ -27,6 +27,8 @@ const closeSessionOnExit = process.env.LIVETALKING_CLOSE_SESSION_ON_EXIT !== '0'
 const videoMaxWidth = envInt('LIVETALKING_VIDEO_MAX_WIDTH', 0);
 const videoMaxHeight = envInt('LIVETALKING_VIDEO_MAX_HEIGHT', 0);
 const videoFps = envFloat('LIVETALKING_VIDEO_FPS', 0);
+const videoFormat = envFormat('LIVETALKING_VIDEO_FORMAT', 'raw');
+const videoQuality = envInt('LIVETALKING_VIDEO_QUALITY', 80);
 const logFile = path.join(__dirname, 'overlay-debug.log');
 
 function debugLog(scope, message, data) {
@@ -81,6 +83,11 @@ function envFloat(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function envFormat(name, fallback) {
+  const value = (process.env[name] || '').trim().toLowerCase();
+  return ['raw', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+}
+
 function createViewerWindow() {
   const initialWidth = envInt('LIVETALKING_WIDTH', 360);
   const initialHeight = envInt('LIVETALKING_HEIGHT', 640);
@@ -95,7 +102,9 @@ function createViewerWindow() {
     closeSessionOnExit,
     videoMaxWidth,
     videoMaxHeight,
-    videoFps
+    videoFps,
+    videoFormat,
+    videoQuality
   });
 
   viewerWindow = new BrowserWindow({
@@ -136,7 +145,9 @@ function createViewerWindow() {
     renderer: process.env.LIVETALKING_RENDERER || 'webgl',
     videoMaxWidth: String(videoMaxWidth),
     videoMaxHeight: String(videoMaxHeight),
-    videoFps: String(videoFps)
+    videoFps: String(videoFps),
+    videoFormat,
+    videoQuality: String(videoQuality)
   });
   viewerWindow.loadFile('viewer.html', { search: `?${params.toString()}` });
 
@@ -407,7 +418,9 @@ app.whenReady().then(() => {
       LIVETALKING_CLICK_THROUGH: process.env.LIVETALKING_CLICK_THROUGH,
       LIVETALKING_PLAY_AUDIO: process.env.LIVETALKING_PLAY_AUDIO,
       LIVETALKING_SCALE: process.env.LIVETALKING_SCALE,
-      LIVETALKING_RENDERER: process.env.LIVETALKING_RENDERER
+      LIVETALKING_RENDERER: process.env.LIVETALKING_RENDERER,
+      LIVETALKING_VIDEO_FORMAT: process.env.LIVETALKING_VIDEO_FORMAT,
+      LIVETALKING_VIDEO_QUALITY: process.env.LIVETALKING_VIDEO_QUALITY
     }
   });
   createViewerWindow();

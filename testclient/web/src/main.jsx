@@ -25,6 +25,8 @@ const DEFAULTS = {
   audioSampleRate: Number.parseInt(import.meta.env.VITE_ALPHA_AUDIO_SAMPLE_RATE || '16000', 10),
   videoMaxHeight: Number.parseInt(import.meta.env.VITE_ALPHA_VIDEO_MAX_HEIGHT || '720', 10),
   videoPreviewFps: Number.parseFloat(import.meta.env.VITE_ALPHA_VIDEO_FPS || '8'),
+  videoFormat: import.meta.env.VITE_ALPHA_VIDEO_FORMAT || 'jpeg',
+  videoQuality: Number.parseInt(import.meta.env.VITE_ALPHA_VIDEO_QUALITY || '80', 10),
   videoRenderIntervalMs: Math.max(33, Number.parseInt(import.meta.env.VITE_VIDEO_RENDER_INTERVAL_MS || '125', 10)),
   alphaAutoConnect: (import.meta.env.VITE_ALPHA_AUTO_CONNECT || '1') !== '0'
 };
@@ -39,10 +41,17 @@ function parseFrame(packet) {
   const width = view.getUint32(8, true);
   const height = view.getUint32(12, true);
   const seq = Number(view.getBigUint64(16, true));
-  if (version !== 1 || format !== 1 || width <= 0 || height <= 0) return null;
-  const pixels = new Uint8ClampedArray(packet, 24);
-  if (pixels.byteLength !== width * height * 4) return null;
-  return { width, height, seq, pixels };
+  if (version !== 1 || width <= 0 || height <= 0) return null;
+  const payload = packet.slice(24);
+  if (format === 1) {
+    const pixels = new Uint8ClampedArray(packet, 24);
+    if (pixels.byteLength !== width * height * 4) return null;
+    return { width, height, seq, format, pixels };
+  }
+  if (format === 2 || format === 3 || format === 4) {
+    return { width, height, seq, format, payload };
+  }
+  return null;
 }
 
 function App() {
@@ -68,6 +77,7 @@ function App() {
   const audioScheduleRef = useRef(0);
   const latestFramePacketRef = useRef(null);
   const renderTimerRef = useRef(0);
+  const drawingFrameRef = useRef(false);
   const lastVideoDrawAtRef = useRef(0);
   const alphaAutoStartedRef = useRef(false);
   const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0, fps: 0 });
@@ -85,12 +95,15 @@ function App() {
     return {
       live,
       tts,
-      alphaWs: wsUrl(live, `/alpha/ws?max_height=${DEFAULTS.videoMaxHeight}&fps=${DEFAULTS.videoPreviewFps}`),
+      alphaWs: wsUrl(
+        live,
+        `/alpha/ws?max_height=${DEFAULTS.videoMaxHeight}&fps=${DEFAULTS.videoPreviewFps}&format=${DEFAULTS.videoFormat}&quality=${DEFAULTS.videoQuality}`
+      ),
       audioWs: wsUrl(live, '/alpha/audio')
     };
   }, [liveTalkingUrl, ttsServerUrl]);
 
-  const drawFrame = useCallback((packet) => {
+  const drawFrame = useCallback(async (packet) => {
     const frame = parseFrame(packet);
     if (!frame) {
       addLog('丢弃无效视频帧');
@@ -103,7 +116,15 @@ function App() {
       canvas.height = frame.height;
     }
     const ctx = canvas.getContext('2d');
-    ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    if (frame.format === 1) {
+      ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    } else {
+      const mime = frame.format === 2 ? 'image/jpeg' : frame.format === 3 ? 'image/png' : 'image/webp';
+      const bitmap = await createImageBitmap(new Blob([frame.payload], { type: mime }));
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0, frame.width, frame.height);
+      bitmap.close();
+    }
 
     const stats = frameStatsRef.current;
     const now = performance.now();
@@ -120,13 +141,22 @@ function App() {
 
   const renderLatestFrame = useCallback(() => {
     renderTimerRef.current = 0;
+    if (drawingFrameRef.current) return;
     const packet = latestFramePacketRef.current;
     latestFramePacketRef.current = null;
     if (packet) {
-      drawFrame(packet);
-      lastVideoDrawAtRef.current = performance.now();
+      drawingFrameRef.current = true;
+      drawFrame(packet)
+        .catch((error) => addLog('绘制视频帧失败', { error: String(error) }))
+        .finally(() => {
+          drawingFrameRef.current = false;
+          lastVideoDrawAtRef.current = performance.now();
+          if (latestFramePacketRef.current) {
+            renderLatestFrame();
+          }
+        });
     }
-  }, [drawFrame]);
+  }, [addLog, drawFrame]);
 
   const enqueueVideoFrame = useCallback((packet) => {
     latestFramePacketRef.current = packet;

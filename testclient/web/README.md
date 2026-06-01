@@ -8,7 +8,7 @@
 - `/alpha/ws` 输出的视频帧尺寸和画面是否正常
 - `/alpha/audio` 是否能在浏览器里播放音频输出
 
-默认显示链路就是 alpha stream。页面启动后会自动创建 alpha session 并连接 `/alpha/ws?max_height=720&fps=8`；不需要先打开官方 WebRTC 页面。
+默认显示链路就是 alpha stream。页面启动后会自动创建 alpha session 并连接 `/alpha/ws?max_height=720&fps=25&format=jpeg&quality=80`；不需要先打开官方 WebRTC 页面。Web 测试页默认使用 JPEG 压缩预览，适合浏览器、远程桌面和 VSCode 端口转发，不用于透明桌面合成。
 
 ## 启动
 
@@ -58,6 +58,6 @@ HF_ENDPOINT=https://hf-mirror.com ./scripts/download-models.sh wav2lip-demo
 
 - 通过 `/alpha/speak`：LiveTalking 调用 `robottts` 兼容 TTS 服务。
 - 通过 TTS task：TTS 服务直接把音频流推给 `/alpha/input/audio`。
-- 点“视频”可手动重连 `/alpha/ws` 预览 raw RGBA 画面；点“音频”连接 `/alpha/audio` 播放 LiveTalking 输出的 PCM 音频。
+- 点“视频”可手动重连 `/alpha/ws` 预览画面；点“音频”连接 `/alpha/audio` 播放 LiveTalking 输出的 PCM 音频。
 
-高分辨率 avatar 的 raw RGBA 帧很大，页面默认请求 `/alpha/ws?max_height=720&fps=8`，并按 `VITE_VIDEO_RENDER_INTERVAL_MS=125` 限频渲染预览，避免测试页面阻塞按钮操作。这些设置只影响测试页面显示，不影响 LiveTalking 服务端原始输出帧率。`VITE_ALPHA_AUTO_CONNECT=0` 可关闭自动连接。
+高分辨率 avatar 的 raw RGBA 帧很大。页面默认请求 `format=jpeg` 并按 `VITE_VIDEO_RENDER_INTERVAL_MS=40` 渲染预览，避免测试页面阻塞按钮操作。这些设置只影响测试页面显示，不影响 LiveTalking 服务端原始输出帧率。`VITE_ALPHA_AUTO_CONNECT=0` 可关闭自动连接。需要检查透明通道时可把 `VITE_ALPHA_VIDEO_FORMAT=raw` 或 `webp` 后重启 Web 客户端。
