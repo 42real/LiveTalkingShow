@@ -56,6 +56,8 @@ class OutputRouter(BaseOutput):
         self.metrics_interval = float(getattr(opt, "output_metrics_interval", 5.0) or 0.0)
         self.sinks: list[BaseOutput] = []
         self.stats = OutputStats()
+        self._player = None
+        self._alpha_player = None
         self._load_primary_sink()
 
     def _load_primary_sink(self) -> None:
@@ -72,6 +74,40 @@ class OutputRouter(BaseOutput):
             [sink.__class__.__name__ for sink in self.sinks],
             self.metrics_interval,
         )
+
+    def attach_player(self, player) -> None:
+        self._player = player
+        for sink in self.sinks:
+            if hasattr(sink, "attach_player"):
+                sink.attach_player(player)
+            else:
+                sink._player = player
+
+    def detach_player(self, player) -> None:
+        if self._player is player:
+            self._player = None
+        for sink in self.sinks:
+            if hasattr(sink, "detach_player"):
+                sink.detach_player(player)
+            elif getattr(sink, "_player", None) is player:
+                sink._player = None
+
+    def attach_alpha_player(self, player) -> None:
+        self._alpha_player = player
+        for sink in self.sinks:
+            if hasattr(sink, "attach_alpha_player"):
+                sink.attach_alpha_player(player)
+            else:
+                sink._alpha_player = player
+
+    def detach_alpha_player(self, player) -> None:
+        if self._alpha_player is player:
+            self._alpha_player = None
+        for sink in self.sinks:
+            if hasattr(sink, "detach_alpha_player"):
+                sink.detach_alpha_player(player)
+            elif getattr(sink, "_alpha_player", None) is player:
+                sink._alpha_player = None
 
     def start(self) -> None:
         for sink in self.sinks:

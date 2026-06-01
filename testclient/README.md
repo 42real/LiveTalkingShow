@@ -10,7 +10,7 @@ LiveTalking 主服务使用仓库根目录的 `uv` 环境；`testclient/backend`
 - `web/`：浏览器可视化测试页面，可发文本、启动 TTS task、查看 alpha 视频帧并播放 alpha 音频输出。
 - `overlay/`：Electron 透明置顶显示窗口，用于模拟桌面助手显示。
 
-默认显示链路是 alpha stream。LiveTalking 主服务默认开启 `LIVETALKING_ALPHA_OUTPUT=1`，Web 测试页打开后会自动创建 alpha session 并连接 `/alpha/ws`，overlay 也只连接 `/alpha/ws` 显示视频。Web 测试页默认用 JPEG 压缩预览以降低远程显示压力；overlay 默认用 raw RGBA 保留透明通道。官方 WebRTC 页面仍可用，但不是 testclient 的默认显示方式。
+默认显示链路是 alpha stream。LiveTalking 主服务默认开启 `LIVETALKING_ALPHA_OUTPUT=1`，Web 测试页打开后会自动创建 alpha session 并连接 `/alpha/ws`，overlay 也只连接 `/alpha/ws` 显示视频。Web 测试页默认用 JPEG 压缩预览以降低远程显示压力；overlay 默认用 raw RGBA 保留透明通道。官方 WebRTC 页面仍可用，但不是 testclient 的默认显示方式。远程透明显示可试主服务内置的 `http://<LiveTalking>:8050/alpha-webrtc.html`，它走 `/alpha/webrtc/offer` 双视频轨合成。
 
 根目录 `.env.example` 只用于 `testclient`，不要把这里的变量混到 LiveTalking 主仓库 `.env.example`。
 
@@ -294,8 +294,11 @@ Web 页面按钮和接口对应关系：
 | TTS task | `POST <TTS>/tts/task/start` | JSON task，包含 `target_hardware`。 |
 | 视频 | `WS <LiveTalking>/alpha/ws?max_height=720&fps=25&format=jpeg&quality=80` | binary，24 字节 header + payload。Web 默认 JPEG；overlay 默认 raw RGBA。 |
 | 音频 | `WS <LiveTalking>/alpha/audio` | binary，PCM16。 |
+| 远程透明 WebRTC | `POST <LiveTalking>/alpha/webrtc/offer` | WebRTC answer。服务端发音频轨、彩色视频轨、alpha mask 视频轨，客户端本地合成透明画面。 |
 | 中断 | `POST <LiveTalking>/interrupt_talk` | JSON sessionid。 |
 | 关闭 | `POST <LiveTalking>/alpha/close` | JSON sessionid。 |
+
+远程透明 WebRTC 客户端要用 `bundlePolicy: "max-bundle"`，并按 `audio recvonly`、`video recvonly`、`video recvonly` 的顺序创建 transceiver。第二条视频轨是 alpha mask，不能直接当普通画面显示。
 
 `alpha/speak` 请求示例：
 

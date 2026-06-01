@@ -187,7 +187,11 @@ class HumanPlayer:
 
         self.__container = avatar_session
         if hasattr(self.__container, 'output'):
-            self.__container.output._player = self
+            output = self.__container.output
+            if hasattr(output, "attach_player"):
+                output.attach_player(self)
+            else:
+                output._player = self
 
     def start(self) -> None:
         """Start the avatar render worker proactively."""
@@ -212,6 +216,12 @@ class HumanPlayer:
             self.__thread.join(timeout=3)
             self.__thread = None
             self.__thread_quit = None
+        if self.__container is not None and hasattr(self.__container, "output"):
+            output = self.__container.output
+            if hasattr(output, "detach_player"):
+                output.detach_player(self)
+            elif getattr(output, "_player", None) is self:
+                output._player = None
         self.__container = None
 
     def push_video(self, frame):

@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LiveTalking Alpha WebRTC</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, "Segoe UI", Arial, sans-serif;
+      background: #111318;
+      color: #eef2f7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 16px;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid #2b313d;
+      background: #171b23;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    button {
+      border: 1px solid #3b4557;
+      border-radius: 6px;
+      padding: 8px 12px;
+      background: #242b38;
+      color: #f5f7fb;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #2f3849;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) 360px;
+      min-height: 0;
+    }
+
+    .stage {
+      position: relative;
+      display: grid;
+      place-items: center;
+      min-height: 0;
+      overflow: hidden;
+      background-color: #222631;
+      background-image:
+        linear-gradient(45deg, #2d3340 25%, transparent 25%),
+        linear-gradient(-45deg, #2d3340 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #2d3340 75%),
+        linear-gradient(-45deg, transparent 75%, #2d3340 75%);
+      background-size: 32px 32px;
+      background-position: 0 0, 0 16px, 16px -16px, -16px 0;
+    }
+
+    canvas {
+      display: block;
+      max-width: 96%;
+      max-height: 96%;
+      object-fit: contain;
+      border: 1px solid rgba(255,255,255,0.16);
+      background: transparent;
+    }
+
+    .panel {
+      min-height: 0;
+      overflow: auto;
+      padding: 16px;
+      border-left: 1px solid #2b313d;
+      background: #151922;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 12px;
+      color: #b9c2d0;
+      font-size: 13px;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid #3b4557;
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #0f131a;
+      color: #f5f7fb;
+      font: inherit;
+    }
+
+    textarea {
+      min-height: 100px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+
+    audio {
+      width: 100%;
+      margin-bottom: 12px;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: 96px 1fr;
+      gap: 6px 10px;
+      margin: 12px 0;
+      color: #c8d0dc;
+      font-size: 13px;
+    }
+
+    .log {
+      height: 260px;
+      overflow: auto;
+      padding: 10px;
+      border: 1px solid #303848;
+      border-radius: 6px;
+      background: #0f131a;
+      color: #cbd4df;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    video {
+      display: none;
+    }
+
+    @media (max-width: 880px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+
+      .panel {
+        border-left: 0;
+        border-top: 1px solid #2b313d;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Alpha WebRTC 双轨透明输出</h1>
+    <div class="toolbar">
+      <button id="start">连接</button>
+      <button id="stop" disabled>断开</button>
+      <button id="speak" disabled>朗读</button>
+      <button id="interrupt" disabled>中断</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage">
+      <canvas id="canvas" width="640" height="360"></canvas>
+      <video id="colorVideo" autoplay playsinline muted></video>
+      <video id="alphaVideo" autoplay playsinline muted></video>
+    </section>
+
+    <aside class="panel">
+      <label>
+        Session ID
+        <input id="sessionid" readonly placeholder="连接后自动生成" />
+      </label>
+      <label>
+        文本
+        <textarea id="text">你好，我是 LiveTalking 的双轨 WebRTC 透明输出测试。彩色画面和 alpha mask 会分别通过两条视频轨传输。</textarea>
+      </label>
+      <audio id="audio" controls autoplay></audio>
+      <div class="kv">
+        <span>状态</span><strong id="status">idle</strong>
+        <span>视频尺寸</span><span id="size">-</span>
+        <span>渲染 FPS</span><span id="fps">0</span>
+        <span>视频轨</span><span id="tracks">0</span>
+      </div>
+      <div id="log" class="log"></div>
+    </aside>
+  </main>
+
+  <script>
+    const startButton = document.getElementById('start');
+    const stopButton = document.getElementById('stop');
+    const speakButton = document.getElementById('speak');
+    const interruptButton = document.getElementById('interrupt');
+    const sessionInput = document.getElementById('sessionid');
+    const textInput = document.getElementById('text');
+    const statusText = document.getElementById('status');
+    const sizeText = document.getElementById('size');
+    const fpsText = document.getElementById('fps');
+    const tracksText = document.getElementById('tracks');
+    const logText = document.getElementById('log');
+    const canvas = document.getElementById('canvas');
+    const audioElement = document.getElementById('audio');
+    const colorVideo = document.getElementById('colorVideo');
+    const alphaVideo = document.getElementById('alphaVideo');
+
+    let pc = null;
+    let renderHandle = 0;
+    let videoTrackCount = 0;
+    let frameCount = 0;
+    let fpsLastAt = performance.now();
+    let webgl = null;
+
+    function log(message, data) {
+      const suffix = data === undefined ? '' : ` ${JSON.stringify(data)}`;
+      logText.textContent += `[${new Date().toLocaleTimeString()}] ${message}${suffix}\n`;
+      logText.scrollTop = logText.scrollHeight;
+    }
+
+    function setStatus(value) {
+      statusText.textContent = value;
+    }
+
+    function waitIceComplete(peer) {
+      if (peer.iceGatheringState === 'complete') return Promise.resolve();
+      return new Promise((resolve) => {
+        const check = () => {
+          if (peer.iceGatheringState === 'complete') {
+            peer.removeEventListener('icegatheringstatechange', check);
+            resolve();
+          }
+        };
+        peer.addEventListener('icegatheringstatechange', check);
+      });
+    }
+
+    async function start() {
+      if (pc) return;
+      setStatus('connecting');
+      startButton.disabled = true;
+      videoTrackCount = 0;
+      tracksText.textContent = '0';
+
+      pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan', bundlePolicy: 'max-bundle' });
+      pc.addTransceiver('audio', { direction: 'recvonly' });
+      const colorTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+      const alphaTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+
+      pc.addEventListener('connectionstatechange', () => {
+        setStatus(pc.connectionState);
+        log('connection state', { state: pc.connectionState });
+      });
+
+      pc.addEventListener('track', (event) => {
+        if (event.track.kind === 'audio') {
+          audioElement.srcObject = new MediaStream([event.track]);
+          audioElement.play().catch((error) => log('audio play blocked', { error: String(error) }));
+          log('audio track received', { id: event.track.id });
+          return;
+        }
+
+        videoTrackCount += 1;
+        tracksText.textContent = String(videoTrackCount);
+        const isAlpha = event.transceiver === alphaTransceiver;
+        const target = isAlpha ? alphaVideo : colorVideo;
+        target.srcObject = new MediaStream([event.track]);
+        target.play().catch((error) => log('video play blocked', { error: String(error) }));
+        log(isAlpha ? 'alpha video track received' : 'color video track received', {
+          id: event.track.id,
+          mid: event.transceiver?.mid || '',
+          expected: event.transceiver === colorTransceiver ? 'color' : 'alpha',
+        });
+      });
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitIceComplete(pc);
+
+      const response = await fetch('/alpha/webrtc/offer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pc.localDescription),
+      });
+      const answer = await response.json();
+      if (!response.ok || !answer.sdp) {
+        throw new Error(answer.msg || `offer failed: ${response.status}`);
+      }
+      sessionInput.value = answer.sessionid || '';
+      await pc.setRemoteDescription(answer);
+
+      stopButton.disabled = false;
+      speakButton.disabled = false;
+      interruptButton.disabled = false;
+      startRenderLoop();
+      log('alpha webrtc connected', { sessionid: answer.sessionid, tracks: answer.tracks });
+    }
+
+    async function stop() {
+      stopButton.disabled = true;
+      speakButton.disabled = true;
+      interruptButton.disabled = true;
+      if (renderHandle) cancelAnimationFrame(renderHandle);
+      renderHandle = 0;
+
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      colorVideo.srcObject = null;
+      alphaVideo.srcObject = null;
+      audioElement.srcObject = null;
+
+      const sessionid = sessionInput.value;
+      if (sessionid) {
+        fetch('/close_session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionid }),
+        }).catch(() => {});
+      }
+      startButton.disabled = false;
+      setStatus('idle');
+      log('alpha webrtc stopped', { sessionid });
+    }
+
+    async function speak() {
+      const sessionid = sessionInput.value;
+      if (!sessionid) return;
+      const response = await fetch('/alpha/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionid,
+          text: textInput.value,
+          type: 'echo',
+          interrupt: true,
+          tts: {
+            voice_id: 0,
+            mode: 'instruct2',
+            prompts: '请自然清晰地朗读。',
+          },
+        }),
+      });
+      const payload = await response.json();
+      log('/alpha/speak', payload);
+    }
+
+    async function interruptTalk() {
+      const sessionid = sessionInput.value;
+      if (!sessionid) return;
+      const response = await fetch('/interrupt_talk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionid }),
+      });
+      const payload = await response.json();
+      log('/interrupt_talk', payload);
+    }
+
+    function initWebGL() {
+      const gl = canvas.getContext('webgl', {
+        alpha: true,
+        premultipliedAlpha: false,
+        antialias: false,
+        desynchronized: true,
+      });
+      if (!gl) throw new Error('WebGL unavailable');
+
+      const vertexSource = `
+        attribute vec2 aPosition;
+        attribute vec2 aTexCoord;
+        varying vec2 vTexCoord;
+        void main() {
+          gl_Position = vec4(aPosition, 0.0, 1.0);
+          vTexCoord = aTexCoord;
+        }
+      `;
+      const fragmentSource = `
+        precision mediump float;
+        varying vec2 vTexCoord;
+        uniform sampler2D uColor;
+        uniform sampler2D uAlpha;
+        void main() {
+          vec4 color = texture2D(uColor, vTexCoord);
+          float alpha = texture2D(uAlpha, vTexCoord).r;
+          gl_FragColor = vec4(color.rgb, alpha);
+        }
+      `;
+      const program = createProgram(gl, vertexSource, fragmentSource);
+      gl.useProgram(program);
+
+      const vertices = new Float32Array([
+        -1, -1, 0, 1,
+         1, -1, 1, 1,
+        -1,  1, 0, 0,
+         1,  1, 1, 0,
+      ]);
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+      const position = gl.getAttribLocation(program, 'aPosition');
+      const texCoord = gl.getAttribLocation(program, 'aTexCoord');
+      gl.enableVertexAttribArray(position);
+      gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 16, 0);
+      gl.enableVertexAttribArray(texCoord);
+      gl.vertexAttribPointer(texCoord, 2, gl.FLOAT, false, 16, 8);
+
+      const colorTexture = createTexture(gl, 0);
+      const alphaTexture = createTexture(gl, 1);
+      gl.uniform1i(gl.getUniformLocation(program, 'uColor'), 0);
+      gl.uniform1i(gl.getUniformLocation(program, 'uAlpha'), 1);
+      gl.clearColor(0, 0, 0, 0);
+
+      return { gl, colorTexture, alphaTexture };
+    }
+
+    function createShader(gl, type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        throw new Error(gl.getShaderInfoLog(shader));
+      }
+      return shader;
+    }
+
+    function createProgram(gl, vertexSource, fragmentSource) {
+      const program = gl.createProgram();
+      gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vertexSource));
+      gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program));
+      }
+      return program;
+    }
+
+    function createTexture(gl, unit) {
+      const texture = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+      return texture;
+    }
+
+    function startRenderLoop() {
+      webgl = webgl || initWebGL();
+      const render = () => {
+        renderHandle = requestAnimationFrame(render);
+        if (colorVideo.readyState < 2 || alphaVideo.readyState < 2) return;
+
+        const width = colorVideo.videoWidth || 640;
+        const height = colorVideo.videoHeight || 360;
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+          sizeText.textContent = `${width}x${height}`;
+        }
+
+        const { gl, colorTexture, alphaTexture } = webgl;
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, colorTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, colorVideo);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, alphaTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, alphaVideo);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+        frameCount += 1;
+        const now = performance.now();
+        if (now - fpsLastAt >= 1000) {
+          fpsText.textContent = String(Math.round(frameCount * 1000 / (now - fpsLastAt)));
+          frameCount = 0;
+          fpsLastAt = now;
+        }
+      };
+      render();
+    }
+
+    startButton.addEventListener('click', () => {
+      start().catch((error) => {
+        setStatus('error');
+        startButton.disabled = false;
+        log('start failed', { error: String(error) });
+      });
+    });
+    stopButton.addEventListener('click', () => {
+      stop().catch((error) => log('stop failed', { error: String(error) }));
+    });
+    speakButton.addEventListener('click', () => {
+      speak().catch((error) => log('speak failed', { error: String(error) }));
+    });
+    interruptButton.addEventListener('click', () => {
+      interruptTalk().catch((error) => log('interrupt failed', { error: String(error) }));
+    });
+    window.addEventListener('beforeunload', () => {
+      if (pc) pc.close();
+    });
+  </script>
+</body>
+</html>
