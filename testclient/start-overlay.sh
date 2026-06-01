@@ -2,11 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-if [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
+. ./load-env-defaults.sh
+load_env_defaults .env
 
 if ! command -v npm >/dev/null 2>&1; then
   for node_dir in "$HOME/anaconda3/bin" "$HOME/miniconda3/bin"; do

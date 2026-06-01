@@ -29,7 +29,6 @@ import torch.nn.functional as F
 import cv2
 import glob
 import pickle
-import copy
 
 import queue
 from queue import Queue
@@ -154,13 +153,22 @@ class MuseReal(BaseAvatar):
 
     def paste_back_frame(self,pred_frame,idx:int):
         bbox = self.coord_list_cycle[idx]
-        ori_frame = copy.deepcopy(self.frame_list_cycle[idx])
-        x1, y1, x2, y2 = bbox
+        ori_frame = self.frame_list_cycle[idx].copy()
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        height, width = ori_frame.shape[:2]
 
+        x1 = max(0, min(width, x1))
+        x2 = max(0, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(0, min(height, y2))
+        if x2 <= x1 or y2 <= y1:
+            return ori_frame
+
+        safe_bbox = (x1, y1, x2, y2)
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
         mask = self.mask_list_cycle[idx]
         mask_crop_box = self.mask_coords_list_cycle[idx]
 
-        combine_frame = get_image_blending(ori_frame,res_frame,bbox,mask,mask_crop_box)
+        combine_frame = get_image_blending(ori_frame,res_frame,safe_bbox,mask,mask_crop_box)
         return combine_frame
             

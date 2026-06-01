@@ -111,19 +111,41 @@ def get_image_blending(image, face, face_box, mask_array, crop_box):
 
 def get_image_prepare_material(image, face_box, upper_boundary_ratio=0.5, expand=1.5, fp=None, mode="raw"):
     body = Image.fromarray(image[:,:,::-1])
+    body_width, body_height = body.size
 
-    x, y, x1, y1 = face_box
+    x, y, x1, y1 = [int(v) for v in face_box]
+    if x1 <= x or y1 <= y or body_width <= 0 or body_height <= 0:
+        return np.zeros((max(1, body_height), max(1, body_width)), dtype=np.uint8), [0, 0, body_width, body_height]
     #print(x1-x,y1-y)
     crop_box, s = get_crop_box(face_box, expand)
-    x_s, y_s, x_e, y_e = crop_box
+    raw_x_s, raw_y_s, raw_x_e, raw_y_e = crop_box
+    x_s = max(0, int(raw_x_s))
+    y_s = max(0, int(raw_y_s))
+    x_e = min(body_width, int(raw_x_e))
+    y_e = min(body_height, int(raw_y_e))
+    crop_box = [x_s, y_s, x_e, y_e]
+    if x_e <= x_s or y_e <= y_s:
+        return np.zeros((body_height, body_width), dtype=np.uint8), [0, 0, body_width, body_height]
 
     face_large = body.crop(crop_box)
     ori_shape = face_large.size
 
     mask_image = face_seg(face_large, mode=mode, fp=fp)
-    mask_small = mask_image.crop((x-x_s, y-y_s, x1-x_s, y1-y_s))
+    if mask_image is None:
+        return np.zeros((ori_shape[1], ori_shape[0]), dtype=np.uint8), crop_box
+
+    face_x0 = max(x, x_s)
+    face_y0 = max(y, y_s)
+    face_x1 = min(x1, x_e)
+    face_y1 = min(y1, y_e)
+    if face_x1 <= face_x0 or face_y1 <= face_y0:
+        return np.zeros((ori_shape[1], ori_shape[0]), dtype=np.uint8), crop_box
+
+    paste_x = face_x0 - x_s
+    paste_y = face_y0 - y_s
+    mask_small = mask_image.crop((paste_x, paste_y, face_x1 - x_s, face_y1 - y_s))
     mask_image = Image.new('L', ori_shape, 0)
-    mask_image.paste(mask_small, (x-x_s, y-y_s, x1-x_s, y1-y_s))
+    mask_image.paste(mask_small, (paste_x, paste_y))
 
     # keep upper_boundary_ratio of talking area
     width, height = mask_image.size

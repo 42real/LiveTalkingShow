@@ -2,11 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-if [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
+. ./load-env-defaults.sh
+load_env_defaults .env
 
 cd backend
 uv run python robottts_test_server.py

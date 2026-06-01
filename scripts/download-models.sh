@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+source "$SCRIPT_DIR/load-env-defaults.sh"
+load_env_defaults "${LIVETALKING_ENV_FILE:-.env}"
+
 MODE="${1:-wav2lip-demo}"
 
 case "$MODE" in

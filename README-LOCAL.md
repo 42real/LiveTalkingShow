@@ -13,9 +13,9 @@ cp .env.example .env
 HF_ENDPOINT=https://hf-mirror.com ./scripts/download-models.sh wav2lip-demo
 ```
 
-这里使用 `--inexact` 是为了保留本机已有的 CUDA、MuseTalk/MMPose 等额外运行依赖；仓库锁文件负责同步主链路依赖。`download-models.sh wav2lip-demo` 会准备默认启动必需的 `models/wav2lip.pth` 和 `data/avatars/wav2lip_avatar_female_model/`。
+这里使用 `--inexact` 是为了保留本机已有的临时调试依赖；仓库锁文件负责同步主链路依赖。MuseTalk avatar 制作依赖单独的 `.venv-musetalk`，不要把 MMPose/MMCV 强行塞进主 `.venv`。`download-models.sh wav2lip-demo` 会准备默认启动必需的 `models/wav2lip.pth` 和 `data/avatars/wav2lip_avatar_female_model/`。
 
-启动方式参考 `robot-asr`：`entrypoint.sh` 只负责进入仓库并启动服务，配置由 Python 侧读取，不需要手动 `source .env`。运行只依赖接口地址和运行参数，不需要配置项目 home 目录。
+启动方式参考 `robot-asr`：`entrypoint.sh` 只负责进入仓库并启动服务，配置由 Python 侧读取，不需要手动 `source .env`。`scripts/download-models.sh` 和 `scripts/setup-musetalk-env.sh` 也会按默认值加载 `.env`，命令前直接写的环境变量仍然优先。运行只依赖接口地址和运行参数，不需要配置项目 home 目录。
 
 配置优先级：
 
@@ -50,8 +50,11 @@ LiveTalking 主服务最常用配置：
 | `LIVETALKING_PORT` | `server.port` | `8050` | LiveTalking | HTTP/WebSocket 端口。改它后，所有客户端里的 LiveTalking URL 都要同步。 |
 | `LIVETALKING_MODEL` | `avatar.model` | `wav2lip` | LiveTalking | avatar 推理模型：`wav2lip` / `musetalk` / `ultralight`。当前交接主链路用 `wav2lip`。 |
 | `AVATAR_ID` | `avatar.avatar_id` | `wav2lip_avatar_female_model` | LiveTalking | `data/avatars/<avatar_id>` 目录名。目录本身不进 Git，需要单独下载或拷贝。 |
-| `LIVETALKING_BATCH_SIZE` | `avatar.batch_size` | `4` | LiveTalking | 推理批大小。低延迟建议 `2-4`；吞吐优先可调大；显存不足调小。 |
+| `LIVETALKING_BATCH_SIZE` | `avatar.batch_size` | `4` | LiveTalking | 推理批大小。MuseTalk 不建议用 `1`，实测会低于实时；桌面助手建议 `4`，显存充足且能接受更高延迟可用 `8`。 |
 | `LIVETALKING_FPS` | `avatar.fps` | `25` | LiveTalking | 内部视频节奏。当前按 25fps 设计，通常不要改。 |
+| `LIVETALKING_CUDNN_BENCHMARK` | - | `1` | PyTorch/CUDA | 固定输入尺寸时让 cuDNN 自动选择更快 kernel。显存不足或需要完全稳定复现时可设 `0`。 |
+| `LIVETALKING_TORCH_TF32` | - | `1` | PyTorch/CUDA | 在 RTX 30 系/Ampere 及更新 GPU 上允许 TF32，加速部分 FP32 矩阵/卷积计算。需要严格数值一致时可设 `0`。 |
+| `LIVETALKING_FLOAT32_MATMUL_PRECISION` | - | `high` | PyTorch/CUDA | `torch.set_float32_matmul_precision` 参数。通常保持 `high`。 |
 | `LIVETALKING_TTS` | `tts.provider` | `robottts` | LiveTalking | TTS 插件。交接方案统一用 `robottts`。 |
 | `TTS_SERVER_URL` | `tts.server_url` | `http://127.0.0.1:8036` | LiveTalking | robottts 兼容 TTS 服务地址。LiveTalking 会连接它的 `/tts/ws`。 |
 | `ROBOTTTS_MODE` | `tts.robottts_mode` | `instruct2` | LiveTalking -> TTS | 透传给 TTS 服务的模式。测试后端支持 `instruct2` / `zero-shot`。 |
@@ -160,7 +163,7 @@ LiveTalking 推理线程
 | Web 测试页 | Node 依赖 | `./start-web.sh` 首次会自动 `npm install`。 |
 | 桌面 overlay | Electron 依赖，且本机要有图形桌面环境 | `./start-overlay.sh` 首次会自动安装依赖；远程机器显示见第 2.5 节。 |
 | wav2lip avatar 制作 | `models/wav2lip.pth`；人脸检测模型 `s3fd.pth` 可自动下载，也可提前下载 | 分别执行 `./scripts/download-models.sh wav2lip` 和 `./scripts/download-models.sh s3fd`，或执行 `./scripts/download-models.sh all`。 |
-| MuseTalk 运行/制作 | MuseTalk、Whisper、VAE、DWPose、FaceParsing 模型，另需 MMPose/MMCV 环境 | `./scripts/download-models.sh musetalk` 下载模型；依赖安装见第 6.2 节。 |
+| MuseTalk 运行/制作 | MuseTalk、Whisper、VAE、DWPose、FaceParsing 模型；制作 avatar 另需专用 `.venv-musetalk` | `./scripts/download-models.sh musetalk` 下载模型；`./scripts/setup-musetalk-env.sh` 准备制作环境；详见第 6.2 节。 |
 | Ultralight 运行/制作 | 自己训练或拿到的 `ultralight.pth` | 当前仓库不提供通用 checkpoint，需要按第 6.3 节放入 avatar 目录。 |
 
 ## 2. 快速启动
@@ -838,14 +841,50 @@ models/face-parse-bisent/resnet18-5c106cde.pth
 models/face-parse-bisent/79999_iter.pth
 ```
 
-MuseTalk 生成 avatar 还会用到 `mmpose` / `mmcv` / `mmengine`。这几个依赖和 CUDA、PyTorch 版本耦合较强，默认 `uv sync` 不强行安装。需要制作 MuseTalk avatar 的机器先按本机 CUDA 版本安装 MMPose 环境，例如：
+MuseTalk 生成 avatar 还会用到 `mmpose` / `mmcv` / `mmengine`。这几个依赖和 CUDA、PyTorch 版本耦合很强，默认主环境 `.venv` 不安装它们；主环境当前使用 `torch==2.5.0+cu124`，OpenMMLab 没有可直接匹配的 `mmcv==2.0.x` 预编译轮子，源码编译又需要 `nvcc`。
+
+本地交接固定使用专用制作环境 `.venv-musetalk`：
 
 ```bash
-uv run --python .venv/bin/python pip install -U openmim
-uv run --python .venv/bin/python mim install "mmengine" "mmcv" "mmdet" "mmpose"
+cd /path/to/LiveTalking
+./scripts/setup-musetalk-env.sh
 ```
 
-如果这一步失败，不要继续调 MuseTalk 参数，先解决 MMPose/MMCV 与本机 CUDA、PyTorch 的兼容。
+脚本会创建 `.venv-musetalk`，安装并校验：
+
+```text
+torch==2.0.1+cu118
+torchvision==0.15.2+cu118
+mmcv==2.0.1
+mmengine==0.10.7
+mmdet==3.1.0
+mmpose==1.1.0
+diffusers==0.30.2
+accelerate==0.28.0
+transformers==4.39.2
+huggingface_hub==0.30.2
+```
+
+CUDA 12 驱动可以运行 `cu118` wheel；如果机器驱动太旧或没有 NVIDIA GPU，这套 MuseTalk 制作环境需要重新按本机条件适配。脚本结尾会打印 `MuseTalk avatar environment OK`，否则不要继续调 MuseTalk 参数。
+
+可覆盖的制作环境变量：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `LIVETALKING_MUSETALK_ENV` | `.venv-musetalk` | 专用环境目录。 |
+| `LIVETALKING_MUSETALK_PYTHON_VERSION` | `3.10` | uv 创建环境使用的 Python 版本。 |
+| `LIVETALKING_MUSETALK_TORCH_VERSION` | `2.0.1+cu118` | PyTorch 版本。换它时通常也要同步换 torchvision、mmcv wheel。 |
+| `LIVETALKING_MUSETALK_TORCHVISION_VERSION` | `0.15.2+cu118` | torchvision 版本。 |
+| `LIVETALKING_MUSETALK_PYTORCH_INDEX` | `https://download.pytorch.org/whl/cu118` | PyTorch wheel 源。 |
+| `LIVETALKING_MUSETALK_MMCV_WHEEL_URL` | OpenMMLab cu118/torch2.0 wheel | full `mmcv` wheel 地址，必须带 `mmcv._ext`。 |
+| `LIVETALKING_MUSETALK_MMCV_VERSION` | `2.0.1` | `mmpose==1.1.0` 要求 `mmcv>=2.0.0,<2.1.0`。 |
+| `LIVETALKING_MUSETALK_MMENGINE_VERSION` | `0.10.7` | OpenMMLab runtime。 |
+| `LIVETALKING_MUSETALK_MMDET_VERSION` | `3.1.0` | DWPose/MMPose 依赖。 |
+| `LIVETALKING_MUSETALK_MMPOSE_VERSION` | `1.1.0` | MuseTalk 官方预处理使用。 |
+| `LIVETALKING_MUSETALK_DIFFUSERS_VERSION` | `0.30.2` | 和 `torch==2.0.1` 兼容的 diffusers 版本。 |
+| `LIVETALKING_MUSETALK_ACCELERATE_VERSION` | `0.28.0` | diffusers 加速依赖。 |
+| `LIVETALKING_MUSETALK_TRANSFORMERS_VERSION` | `4.39.2` | 和 `torch==2.0.1` 兼容的 transformers 版本。 |
+| `LIVETALKING_MUSETALK_HUGGINGFACE_HUB_VERSION` | `0.30.2` | Hugging Face 下载/缓存依赖。 |
 
 必要文件：
 
@@ -862,7 +901,7 @@ data/avatars/<avatar_id>/
 
 ```bash
 cd /path/to/LiveTalking
-HF_ENDPOINT=https://hf-mirror.com uv run --python .venv/bin/python python -m avatars.musetalk.genavatar \
+HF_ENDPOINT=https://hf-mirror.com .venv-musetalk/bin/python -m avatars.musetalk.genavatar \
   --file /path/to/person.mp4 \
   --avatar_id my_musetalk_avatar \
   --version v15 \
@@ -884,6 +923,14 @@ MuseTalk 制作参数：
 | `--parsing_mode` | `jaw` / `neck` / `raw` | `jaw` | 融合 mask 范围。`jaw` 适合下颌，`neck` 范围更大，`raw` 更接近原始区域。 |
 | `--gpu_id` | GPU 编号 | `0` | 当前函数内部主要看 CUDA 可用性，保留为兼容参数。 |
 | `--left_cheek_width` / `--right_cheek_width` | 正整数 | `90` | CLI 保留参数，当前生成函数未实际传入，通常不用调。 |
+
+制作完成后，运行 LiveTalking 主服务仍然使用主 `.venv` 和 `./entrypoint.sh`：
+
+```bash
+LIVETALKING_MODEL=musetalk AVATAR_ID=my_musetalk_avatar ./entrypoint.sh
+```
+
+`data/avatars/<avatar_id>/coords.pkl` 中如果出现少数 `(0, 0, 0, 0)` 人脸框，运行时会跳过这些帧的嘴型贴回并保留原图，避免 `cv2.resize` 报错。大量无效框通常说明源视频里脸部太小、侧脸太多、遮挡太多或裁剪参数不合适，需要重新制作素材或调 `--bbox_shift` / `--extra_margin` / `--parsing_mode`。
 
 ### 6.3 Ultralight
 
@@ -949,6 +996,9 @@ curl -X POST http://127.0.0.1:8050/interrupt_talk \
 
 - `start-livetalking.sh`
 - `entrypoint.sh`
+- `scripts/download-models.sh`
+- `scripts/load-env-defaults.sh`
+- `scripts/setup-musetalk-env.sh`
 - `config.py`
 - `config.yaml`
 - `pyproject.toml`
@@ -968,6 +1018,8 @@ curl -X POST http://127.0.0.1:8050/interrupt_talk \
 不进 Git，需要单独准备：
 
 - `.venv/`
+- `.venv-musetalk/`
+- `.venv-*/`
 - `.env`
 - `models/*`
 - `hf_assets/`、`downloads/`、`pretrained/`、`checkpoints/`、`weights/`
@@ -1017,7 +1069,8 @@ curl -X POST http://127.0.0.1:8050/alpha/session \
 - overlay 没画面：确认 `LIVETALKING_ALPHA_OUTPUT=1` 或启动参数带 `--alpha_output`，并且 `LIVETALKING_SERVER` 指向正确地址。
 - overlay 画面尺寸不对：检查 `data/avatars/<avatar_id>/full_imgs` 原图宽高，控制条缩放只改显示倍率。
 - 声音重复：保持 `LIVETALKING_PLAY_AUDIO=0`，让 TTS 或业务组件播放声音。
-- 推理卡顿：先把 `--batch_size` 降到 `4` 或 `2`；确认 GPU 推理 fps 和最终输出 fps 都接近 25。
+- MuseTalk 推理卡顿：不要用 `batch_size=1`。RTX 3090 + `musetalk_m3d_s3fd` 实测 `1` 约 10 FPS，`2` 约 17-19 FPS，`4` 约 27-29 FPS，`8` 约 35-39 FPS；推荐 `4`，吞吐优先用 `8`。
+- 低延迟优先：优先用 `wav2lip`；MuseTalk 质量潜力更高，但实时链路要靠 batch 换吞吐，batch 越大首帧延迟越高。
 - 人脸裁剪不准：wav2lip 调 `--pads`；MuseTalk 调 `--bbox_shift`、`--extra_margin`、`--parsing_mode`。
 - Hugging Face 访问失败：启动前加 `HF_ENDPOINT=https://hf-mirror.com`。
 

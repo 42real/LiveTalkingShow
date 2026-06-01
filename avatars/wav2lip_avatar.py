@@ -27,7 +27,6 @@ import time
 import cv2
 import glob
 import pickle
-import copy
 
 import queue
 from queue import Queue
@@ -147,7 +146,7 @@ class LipReal(BaseAvatar):
 
     def paste_back_frame(self,pred_frame,idx:int):
         bbox = self.coord_list_cycle[idx]
-        combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        combine_frame = self.frame_list_cycle[idx].copy()
         y1, y2, x1, x2 = bbox
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
         if combine_frame.ndim == 3 and combine_frame.shape[2] == 4:

@@ -12,6 +12,7 @@ node_modules/
 
 # Local environments and editor files
 .venv/
+.venv-*/
 .env
 .env.*
 !.env.example
