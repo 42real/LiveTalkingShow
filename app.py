@@ -128,6 +128,7 @@ def main():
     _avatar_modules = {
         'musetalk':   'avatars.musetalk_avatar',
         'wav2lip':    'avatars.wav2lip_avatar',
+        'wav2lip384': 'avatars.wav2lip384_avatar',
         'ultralight': 'avatars.ultralight_avatar',
     }
     import importlib
@@ -142,9 +143,13 @@ def main():
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id) 
         warm_up(opt.batch_size,model)      
     elif opt.model == 'wav2lip':
-        model = load_model("./models/wav2lip.pth")
+        model = load_model(opt.modelfile or "./models/wav2lip.pth")
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size,model,256)
+    elif opt.model == 'wav2lip384':
+        model = load_model(opt.modelfile or "./models/wav2lip384.pth")
+        global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
+        warm_up(opt.batch_size,model,384)
     elif opt.model == 'ultralight':
         model = load_model(opt)
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
