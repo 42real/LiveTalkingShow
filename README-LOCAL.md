@@ -357,6 +357,8 @@ LIVETALKING_SERVER=http://<LiveTalking服务器IP>:8050 ./start-overlay.sh
 
 LiveTalking、TTS 和显示端只通过接口通信，不依赖彼此的代码目录或存储路径。生产环境把接口地址配对即可。
 
+完整接口协议文档见 [`docs/API-PROTOCOL.md`](docs/API-PROTOCOL.md)。当前 LiveTalking 主服务使用 `aiohttp.web`，不是 FastAPI，也没有自动 Swagger/OpenAPI `/docs`；接口规范以该协议文档和本节说明为准。
+
 ### 4.1 robottts 兼容 TTS 服务
 
 LiveTalking 的 `tts/robottts.py` 只依赖这些接口。真实 `robot-tts` 和 `testclient/backend` 都应保持同一协议。
