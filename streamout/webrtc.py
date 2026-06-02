@@ -22,10 +22,12 @@ class WebRTCOutput(BaseOutput):
     def __init__(self, opt=None, parent: Optional['BaseAvatar'] = None, **kwargs):
         super().__init__(opt, parent)
         self._player = None
+        self._alpha_player = None
         self._alpha_next_frame_time = None
         self._alpha_video_count = 0
         self._alpha_audio_count = 0
         self._alpha_audio_bytes = 0
+        self._alpha_video_pace_sleep_ms = 0.0
         self._alpha_last_video_shape = None
         self._alpha_last_video_log = 0.0
         self._alpha_last_video_count = 0
@@ -40,12 +42,32 @@ class WebRTCOutput(BaseOutput):
             getattr(self.opt, "fps", None),
         )
 
+    def attach_player(self, player) -> None:
+        self._player = player
+        logger.info("streamout/webrtc attached player=%s", player.__class__.__name__)
+
+    def detach_player(self, player) -> None:
+        if self._player is player:
+            self._player = None
+            logger.info("streamout/webrtc detached player=%s", player.__class__.__name__)
+
+    def attach_alpha_player(self, player) -> None:
+        self._alpha_player = player
+        logger.info("streamout/webrtc attached alpha player=%s", player.__class__.__name__)
+
+    def detach_alpha_player(self, player) -> None:
+        if self._alpha_player is player:
+            self._alpha_player = None
+            logger.info("streamout/webrtc detached alpha player=%s", player.__class__.__name__)
+
     def push_video_frame(self, frame) -> None:
         if getattr(self.opt, "alpha_output", False):
             self._pace_alpha_frame()
             if alpha_frame_hub.has_clients():
                 self._log_alpha_video_frame(frame)
                 alpha_frame_hub.publish_frame(frame)
+        if self._alpha_player:
+            self._alpha_player.push_video(frame)
         if self._player:
             if getattr(frame, "ndim", 0) == 3 and frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
@@ -56,18 +78,23 @@ class WebRTCOutput(BaseOutput):
             if alpha_audio_hub.has_clients():
                 self._log_alpha_audio_frame(frame, eventpoint)
                 alpha_audio_hub.publish_bytes(frame.tobytes())
+        if self._alpha_player:
+            self._alpha_player.push_audio(frame, eventpoint)
         if self._player:
             self._player.push_audio(frame, eventpoint)
 
 
 
     def get_buffer_size(self) -> int:
+        sizes = []
         if self._player and hasattr(self._player, 'get_buffer_size'):
-            return self._player.get_buffer_size()
-        return 0
+            sizes.append(self._player.get_buffer_size())
+        if self._alpha_player and hasattr(self._alpha_player, 'get_buffer_size'):
+            sizes.append(self._alpha_player.get_buffer_size())
+        return max(sizes, default=0)
 
     def _pace_alpha_frame(self) -> None:
-        if self._player is not None:
+        if self._player is not None or self._alpha_player is not None:
             return
 
         fps = max(1, int(getattr(self.opt, "fps", 25)))
@@ -76,7 +103,9 @@ class WebRTCOutput(BaseOutput):
         if self._alpha_next_frame_time is None:
             self._alpha_next_frame_time = now
         elif self._alpha_next_frame_time > now:
-            time.sleep(self._alpha_next_frame_time - now)
+            sleep_seconds = self._alpha_next_frame_time - now
+            time.sleep(sleep_seconds)
+            self._alpha_video_pace_sleep_ms += sleep_seconds * 1000
             now = time.perf_counter()
         elif now - self._alpha_next_frame_time > frame_interval:
             self._alpha_next_frame_time = now
@@ -98,12 +127,14 @@ class WebRTCOutput(BaseOutput):
         frame_delta = self._alpha_video_count - self._alpha_last_video_count
         fps = frame_delta / interval if interval > 0 else 0.0
         logger.info(
-            "streamout alpha video frame count=%d shape=%s dtype=%s fps=%.1f",
+            "streamout alpha video frame count=%d shape=%s dtype=%s fps=%.1f avg_pace_sleep_ms=%.2f",
             self._alpha_video_count,
             shape,
             dtype,
             fps,
+            self._alpha_video_pace_sleep_ms / max(1, frame_delta),
         )
+        self._alpha_video_pace_sleep_ms = 0.0
         self._alpha_last_video_shape = shape_key
         self._alpha_last_video_log = now
         self._alpha_last_video_count = self._alpha_video_count

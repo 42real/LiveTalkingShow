@@ -11,6 +11,8 @@ let zoomScale = clampScale(readPositiveFloatParam('scale', 1));
 let videoMaxWidth = readNonNegativeIntParam('videoMaxWidth', 0);
 let videoMaxHeight = readNonNegativeIntParam('videoMaxHeight', 0);
 let videoFps = readPositiveFloatParam('videoFps', 0);
+let videoFormat = readFormatParam('videoFormat', 'raw');
+let videoQuality = readQualityParam('videoQuality', 80);
 
 let socket = null;
 let audioSocket = null;
@@ -58,6 +60,16 @@ function readNonNegativeIntParam(name, fallback) {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+function readFormatParam(name, fallback) {
+  const value = (urlParams.get(name) || '').trim().toLowerCase();
+  return ['raw', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+}
+
+function readQualityParam(name, fallback) {
+  const value = Number.parseInt(urlParams.get(name) || '', 10);
+  return Number.isFinite(value) && value >= 1 && value <= 100 ? value : fallback;
+}
+
 function clampScale(value) {
   if (!Number.isFinite(value)) return 1;
   return Math.min(3, Math.max(0.25, value));
@@ -77,6 +89,8 @@ function alphaVideoPath() {
   if (videoMaxWidth > 0) params.set('max_width', String(videoMaxWidth));
   if (videoMaxHeight > 0) params.set('max_height', String(videoMaxHeight));
   if (videoFps > 0) params.set('fps', String(videoFps));
+  params.set('format', videoFormat);
+  if (videoQuality > 0) params.set('quality', String(videoQuality));
   const query = params.toString();
   return query ? `/alpha/ws?${query}` : '/alpha/ws';
 }
@@ -89,7 +103,15 @@ function connect() {
   }
 
   const videoPath = alphaVideoPath();
-  log('connect video websocket', { serverBase, url: wsUrl(serverBase, videoPath), videoMaxWidth, videoMaxHeight, videoFps });
+  log('connect video websocket', {
+    serverBase,
+    url: wsUrl(serverBase, videoPath),
+    videoMaxWidth,
+    videoMaxHeight,
+    videoFps,
+    videoFormat,
+    videoQuality
+  });
   socket = new WebSocket(wsUrl(serverBase, videoPath));
   socket.binaryType = 'arraybuffer';
   socket.onopen = () => {
@@ -262,15 +284,19 @@ function scheduleDraw() {
   requestAnimationFrame(drawLatestFrame);
 }
 
-function drawLatestFrame() {
-  drawing = false;
+async function drawLatestFrame() {
   const packet = pendingFrame;
   pendingFrame = null;
-  if (!packet) return;
+  if (!packet) {
+    drawing = false;
+    return;
+  }
 
   const parsed = parseFrame(packet);
   if (!parsed) {
     log('drop invalid frame', { byteLength: packet.byteLength });
+    drawing = false;
+    if (pendingFrame) scheduleDraw();
     return;
   }
 
@@ -289,15 +315,17 @@ function drawLatestFrame() {
   requestWindowResize(parsed.width, parsed.height);
 
   try {
-    frameRenderer.draw(parsed);
+    await frameRenderer.draw(parsed);
   } catch (error) {
     console.error(error);
     scheduleContextReload();
+    drawing = false;
     return;
   }
   frameStats.drawn++;
   updateFpsStatus();
 
+  drawing = false;
   if (pendingFrame) scheduleDraw();
 }
 
@@ -355,21 +383,34 @@ function parseFrame(packet) {
   const format = view.getUint8(5);
   const width = view.getUint32(8, true);
   const height = view.getUint32(12, true);
-  if (version !== 1 || format !== 1 || width <= 0 || height <= 0) {
+  if (version !== 1 || width <= 0 || height <= 0) {
     log('invalid frame metadata', { version, format, width, height });
     return null;
   }
 
-  const expected = 24 + width * height * 4;
-  if (packet.byteLength !== expected) {
-    log('invalid frame payload length', { expected, actual: packet.byteLength, width, height });
-    return null;
+  if (format === 1) {
+    const expected = 24 + width * height * 4;
+    if (packet.byteLength !== expected) {
+      log('invalid frame payload length', { expected, actual: packet.byteLength, width, height });
+      return null;
+    }
+    return {
+      width,
+      height,
+      format,
+      rgba: new Uint8Array(packet, 24)
+    };
   }
-  return {
-    width,
-    height,
-    rgba: new Uint8Array(packet, 24)
-  };
+  if (format === 2 || format === 3 || format === 4) {
+    return {
+      width,
+      height,
+      format,
+      encoded: new Uint8Array(packet, 24)
+    };
+  }
+  log('unsupported frame format', { format });
+  return null;
 }
 
 function createFrameRenderer(canvas) {
@@ -444,7 +485,11 @@ function createFrameRenderer(canvas) {
   let lastCanvasSignature = '';
 
   return {
-    draw(frame) {
+    async draw(frame) {
+      if (frame.format !== 1) {
+        await drawEncodedFrame(canvas, frame);
+        return;
+      }
       const resized = resizeCanvasToDisplaySize(canvas, frame.width, frame.height);
       const canvasSignature = `${canvas.width}x${canvas.height}`;
       if (resized || canvasSignature !== lastCanvasSignature) {
@@ -504,8 +549,12 @@ function createCanvas2dRenderer(canvas) {
   const sourceCtx = sourceCanvas.getContext('2d', { alpha: true, desynchronized: true });
   if (!sourceCtx) throw new Error('Canvas 2D source renderer is not available');
   return {
-    draw(frame) {
+    async draw(frame) {
       resizeCanvasToDisplaySize(canvas, frame.width, frame.height);
+      if (frame.format !== 1) {
+        await drawEncodedFrame(canvas, frame);
+        return;
+      }
       if (sourceCanvas.width !== frame.width || sourceCanvas.height !== frame.height) {
         sourceCanvas.width = frame.width;
         sourceCanvas.height = frame.height;
@@ -523,6 +572,17 @@ function createCanvas2dRenderer(canvas) {
       ctx.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
     }
   };
+}
+
+async function drawEncodedFrame(canvas, frame) {
+  const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  if (!ctx) throw new Error('Canvas 2D renderer is not available');
+  resizeCanvasToDisplaySize(canvas, frame.width, frame.height);
+  const mime = frame.format === 2 ? 'image/jpeg' : frame.format === 3 ? 'image/png' : 'image/webp';
+  const bitmap = await createImageBitmap(new Blob([frame.encoded], { type: mime }));
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
 }
 
 function resizeCanvasToDisplaySize(canvas, fallbackWidth, fallbackHeight) {
@@ -623,6 +683,11 @@ log('viewer loaded', {
   autoSession,
   closeSessionOnExit,
   zoomScale,
+  videoMaxWidth,
+  videoMaxHeight,
+  videoFps,
+  videoFormat,
+  videoQuality,
   renderer: urlParams.get('renderer') || 'webgl',
   userAgent: navigator.userAgent,
   devicePixelRatio: window.devicePixelRatio

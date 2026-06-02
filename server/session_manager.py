@@ -87,6 +87,9 @@ class SessionManager:
                 player = getattr(getattr(avatar_session, "output", None), "_player", None)
                 if player is not None and hasattr(player, "stop_worker"):
                     player.stop_worker()
+                alpha_player = getattr(getattr(avatar_session, "output", None), "_alpha_player", None)
+                if alpha_player is not None and hasattr(alpha_player, "stop_worker"):
+                    alpha_player.stop_worker()
             except Exception:
                 logger.exception("failed to stop session worker: %s", sessionid)
             self.sessions.pop(sessionid, None)

@@ -30,6 +30,8 @@ const DEFAULTS = {
   audioSampleRate: Number.parseInt(import.meta.env.VITE_ALPHA_AUDIO_SAMPLE_RATE || '16000', 10),
   videoMaxHeight: Number.parseInt(paramOrEnv('max_height', 'VITE_ALPHA_VIDEO_MAX_HEIGHT', '0'), 10),
   videoPreviewFps: Number.parseFloat(paramOrEnv('fps', 'VITE_ALPHA_VIDEO_FPS', '25')),
+  videoFormat: paramOrEnv('format', 'VITE_ALPHA_VIDEO_FORMAT', 'raw'),
+  videoQuality: Number.parseInt(paramOrEnv('quality', 'VITE_ALPHA_VIDEO_QUALITY', '80'), 10),
   videoRenderIntervalMs: Math.max(16, Number.parseInt(paramOrEnv('render_ms', 'VITE_VIDEO_RENDER_INTERVAL_MS', '40'), 10)),
   sharpness: Math.max(0, Math.min(100, Number.parseInt(paramOrEnv('sharpness', 'VITE_ALPHA_SHARPNESS', '0'), 10))),
   videoFit: paramOrEnv('fit', 'VITE_ALPHA_VIDEO_FIT', 'contain'),
@@ -53,10 +55,17 @@ function parseFrame(packet) {
   const width = view.getUint32(8, true);
   const height = view.getUint32(12, true);
   const seq = Number(view.getBigUint64(16, true));
-  if (version !== 1 || format !== 1 || width <= 0 || height <= 0) return null;
-  const pixels = new Uint8ClampedArray(packet, 24);
-  if (pixels.byteLength !== width * height * 4) return null;
-  return { width, height, seq, pixels };
+  if (version !== 1 || width <= 0 || height <= 0) return null;
+  const payload = packet.slice(24);
+  if (format === 1) {
+    const pixels = new Uint8ClampedArray(packet, 24);
+    if (pixels.byteLength !== width * height * 4) return null;
+    return { width, height, seq, format, pixels };
+  }
+  if (format === 2 || format === 3 || format === 4) {
+    return { width, height, seq, format, payload };
+  }
+  return null;
 }
 
 function App() {
@@ -91,6 +100,7 @@ function App() {
   const audioScheduleRef = useRef(0);
   const latestFramePacketRef = useRef(null);
   const renderTimerRef = useRef(0);
+  const drawingFrameRef = useRef(false);
   const lastVideoDrawAtRef = useRef(0);
   const alphaAutoStartedRef = useRef(false);
   const frameStatsRef = useRef({ lastAt: performance.now(), lastSeq: 0, fps: 0 });
@@ -108,7 +118,10 @@ function App() {
     return {
       live,
       tts,
-      alphaWs: wsUrl(live, `/alpha/ws?max_height=${videoMaxHeight}&fps=${videoPreviewFps}`),
+      alphaWs: wsUrl(
+        live,
+        `/alpha/ws?max_height=${videoMaxHeight}&fps=${videoPreviewFps}&format=${DEFAULTS.videoFormat}&quality=${DEFAULTS.videoQuality}`
+      ),
       audioWs: wsUrl(live, '/alpha/audio')
     };
   }, [liveTalkingUrl, ttsServerUrl, videoMaxHeight, videoPreviewFps]);
@@ -161,7 +174,7 @@ function App() {
       : 'none'
   }), [sharpness]);
 
-  const drawFrame = useCallback((packet) => {
+  const drawFrame = useCallback(async (packet) => {
     const frame = parseFrame(packet);
     if (!frame) {
       addLog('丢弃无效视频帧');
@@ -174,7 +187,15 @@ function App() {
       canvas.height = frame.height;
     }
     const ctx = canvas.getContext('2d');
-    ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    if (frame.format === 1) {
+      ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    } else {
+      const mime = frame.format === 2 ? 'image/jpeg' : frame.format === 3 ? 'image/png' : 'image/webp';
+      const bitmap = await createImageBitmap(new Blob([frame.payload], { type: mime }));
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0, frame.width, frame.height);
+      bitmap.close();
+    }
     window.requestAnimationFrame(updateCanvasBox);
 
     const stats = frameStatsRef.current;
@@ -192,13 +213,22 @@ function App() {
 
   const renderLatestFrame = useCallback(() => {
     renderTimerRef.current = 0;
+    if (drawingFrameRef.current) return;
     const packet = latestFramePacketRef.current;
     latestFramePacketRef.current = null;
     if (packet) {
-      drawFrame(packet);
-      lastVideoDrawAtRef.current = performance.now();
+      drawingFrameRef.current = true;
+      drawFrame(packet)
+        .catch((error) => addLog('绘制视频帧失败', { error: String(error) }))
+        .finally(() => {
+          drawingFrameRef.current = false;
+          lastVideoDrawAtRef.current = performance.now();
+          if (latestFramePacketRef.current) {
+            renderLatestFrame();
+          }
+        });
     }
-  }, [drawFrame]);
+  }, [addLog, drawFrame]);
 
   const enqueueVideoFrame = useCallback((packet) => {
     latestFramePacketRef.current = packet;

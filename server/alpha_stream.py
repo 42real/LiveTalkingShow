@@ -15,7 +15,25 @@ from utils.logger import logger
 FRAME_MAGIC = b"LTAF"
 FRAME_VERSION = 1
 FRAME_FORMAT_RGBA8 = 1
+FRAME_FORMAT_JPEG = 2
+FRAME_FORMAT_PNG = 3
+FRAME_FORMAT_WEBP = 4
 FRAME_HEADER = struct.Struct("<4sBBHIIQ")
+FRAME_FORMAT_NAMES = {
+    FRAME_FORMAT_RGBA8: "raw",
+    FRAME_FORMAT_JPEG: "jpeg",
+    FRAME_FORMAT_PNG: "png",
+    FRAME_FORMAT_WEBP: "webp",
+}
+FRAME_FORMAT_CODES = {
+    "raw": FRAME_FORMAT_RGBA8,
+    "rgba": FRAME_FORMAT_RGBA8,
+    "rgba8": FRAME_FORMAT_RGBA8,
+    "jpeg": FRAME_FORMAT_JPEG,
+    "jpg": FRAME_FORMAT_JPEG,
+    "png": FRAME_FORMAT_PNG,
+    "webp": FRAME_FORMAT_WEBP,
+}
 
 
 @dataclass
@@ -27,6 +45,8 @@ class _Client:
     max_height: int = 0
     fps: float = 0.0
     next_send_at: float = 0.0
+    frame_format: int = FRAME_FORMAT_RGBA8
+    quality: int = 80
 
 
 class LatestFrameHub:
@@ -50,6 +70,11 @@ class LatestFrameHub:
         self._last_log_time = 0.0
         self._last_log_seq = 0
         self._dropped_packets = 0
+        self._convert_ms = 0.0
+        self._resize_ms = 0.0
+        self._packet_ms = 0.0
+        self._send_schedule_ms = 0.0
+        self._packet_bytes = 0
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -59,7 +84,15 @@ class LatestFrameHub:
         with self._lock:
             return bool(self._clients)
 
-    async def add_client(self, ws: web.WebSocketResponse, max_width: int = 0, max_height: int = 0, fps: float = 0.0):
+    async def add_client(
+        self,
+        ws: web.WebSocketResponse,
+        max_width: int = 0,
+        max_height: int = 0,
+        fps: float = 0.0,
+        frame_format: int = FRAME_FORMAT_RGBA8,
+        quality: int = 80,
+    ):
         queue = asyncio.Queue(maxsize=1)
         task = asyncio.create_task(self._pump(ws, queue))
         with self._lock:
@@ -70,17 +103,21 @@ class LatestFrameHub:
                 max_width=max_width,
                 max_height=max_height,
                 fps=fps,
+                frame_format=frame_format,
+                quality=quality,
             )
-            last_packet = self._last_packet if not max_width and not max_height else None
+            last_packet = self._last_packet if not max_width and not max_height and frame_format == FRAME_FORMAT_RGBA8 else None
             client_count = len(self._clients)
         if last_packet:
             self._replace_latest(queue, last_packet)
         logger.info(
-            "alpha raw video websocket registered clients=%d max_width=%d max_height=%d fps=%.1f",
+            "alpha video websocket registered clients=%d max_width=%d max_height=%d fps=%.1f format=%s quality=%d",
             client_count,
             max_width,
             max_height,
             fps,
+            FRAME_FORMAT_NAMES.get(frame_format, str(frame_format)),
+            quality,
         )
 
     def remove_client(self, ws: web.WebSocketResponse):
@@ -131,15 +168,31 @@ class LatestFrameHub:
         full_packet = None
         for client in send_clients:
             if client.max_width or client.max_height:
+                resize_start = time.perf_counter()
                 client_frame = self._resize_for_client(frame, client)
-                client_packet = self._make_packet(self._to_rgba(client_frame), seq)
+                self._resize_ms += (time.perf_counter() - resize_start) * 1000
+                packet_start = time.perf_counter()
+                client_packet = self._make_packet(client_frame, seq, client.frame_format, client.quality)
+                self._packet_ms += (time.perf_counter() - packet_start) * 1000
+                self._packet_bytes += len(client_packet)
             else:
-                if full_packet is None:
-                    full_packet = self._make_packet(self._to_rgba(frame), seq)
-                    with self._lock:
-                        self._last_packet = full_packet
-                client_packet = full_packet
+                if client.frame_format == FRAME_FORMAT_RGBA8:
+                    if full_packet is None:
+                        packet_start = time.perf_counter()
+                        full_packet = self._make_packet(frame, seq, client.frame_format, client.quality)
+                        self._packet_ms += (time.perf_counter() - packet_start) * 1000
+                        self._packet_bytes += len(full_packet)
+                        with self._lock:
+                            self._last_packet = full_packet
+                    client_packet = full_packet
+                else:
+                    packet_start = time.perf_counter()
+                    client_packet = self._make_packet(frame, seq, client.frame_format, client.quality)
+                    self._packet_ms += (time.perf_counter() - packet_start) * 1000
+                    self._packet_bytes += len(client_packet)
+            schedule_start = time.perf_counter()
             loop.call_soon_threadsafe(self._replace_latest, client.queue, client_packet)
+            self._send_schedule_ms += (time.perf_counter() - schedule_start) * 1000
 
     def _to_rgba(self, frame: np.ndarray) -> np.ndarray:
         if not frame.flags["C_CONTIGUOUS"]:
@@ -148,19 +201,49 @@ class LatestFrameHub:
             return cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
 
-    def _make_packet(self, rgba: np.ndarray, seq: int) -> bytes:
-        height, width = rgba.shape[:2]
-        if not rgba.flags["C_CONTIGUOUS"]:
-            rgba = np.ascontiguousarray(rgba)
+    def _make_packet(self, frame: np.ndarray, seq: int, frame_format: int, quality: int) -> bytes:
+        height, width = frame.shape[:2]
+        if frame_format == FRAME_FORMAT_RGBA8:
+            convert_start = time.perf_counter()
+            rgba = self._to_rgba(frame)
+            self._convert_ms += (time.perf_counter() - convert_start) * 1000
+            if not rgba.flags["C_CONTIGUOUS"]:
+                rgba = np.ascontiguousarray(rgba)
+            payload = rgba.tobytes()
+        else:
+            payload = self._encode_image(frame, frame_format, quality)
         return FRAME_HEADER.pack(
             FRAME_MAGIC,
             FRAME_VERSION,
-            FRAME_FORMAT_RGBA8,
+            frame_format,
             0,
             width,
             height,
             seq,
-        ) + rgba.tobytes()
+        ) + payload
+
+    def _encode_image(self, frame: np.ndarray, frame_format: int, quality: int) -> bytes:
+        if frame_format == FRAME_FORMAT_JPEG:
+            image = frame
+            if frame.shape[2] == 4:
+                image = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            params = [cv2.IMWRITE_JPEG_QUALITY, quality]
+            ext = ".jpg"
+        elif frame_format == FRAME_FORMAT_PNG:
+            image = frame
+            params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
+            ext = ".png"
+        elif frame_format == FRAME_FORMAT_WEBP:
+            image = frame
+            params = [cv2.IMWRITE_WEBP_QUALITY, quality]
+            ext = ".webp"
+        else:
+            raise ValueError(f"unsupported alpha frame format: {frame_format}")
+
+        ok, encoded = cv2.imencode(ext, image, params)
+        if not ok:
+            raise RuntimeError(f"failed to encode alpha frame as {FRAME_FORMAT_NAMES.get(frame_format, frame_format)}")
+        return encoded.tobytes()
 
     def _resize_for_client(self, frame: np.ndarray, client: _Client) -> np.ndarray:
         height, width = frame.shape[:2]
@@ -224,7 +307,8 @@ class LatestFrameHub:
         frame_delta = self._seq - self._last_log_seq
         fps = frame_delta / interval if interval > 0 else 0.0
         logger.info(
-            "alpha frame publish seq=%d size=%dx%d dtype=%s clients=%d fps=%.1f queue_drop=%d",
+            "alpha frame publish seq=%d size=%dx%d dtype=%s clients=%d fps=%.1f queue_drop=%d "
+            "avg_resize_ms=%.2f avg_convert_ms=%.2f avg_packet_ms=%.2f avg_schedule_ms=%.2f avg_packet_mb=%.2f",
             self._seq,
             width,
             height,
@@ -232,11 +316,21 @@ class LatestFrameHub:
             client_count,
             fps,
             self._dropped_packets,
+            self._resize_ms / max(1, frame_delta),
+            self._convert_ms / max(1, frame_delta),
+            self._packet_ms / max(1, frame_delta),
+            self._send_schedule_ms / max(1, frame_delta),
+            (self._packet_bytes / max(1, frame_delta)) / (1024 * 1024),
         )
         self._last_shape = shape
         self._last_log_time = now
         self._last_log_seq = self._seq
         self._dropped_packets = 0
+        self._convert_ms = 0.0
+        self._resize_ms = 0.0
+        self._packet_ms = 0.0
+        self._send_schedule_ms = 0.0
+        self._packet_bytes = 0
 
 
 class AudioHub:
@@ -376,19 +470,35 @@ def _query_float(
     return max(min_value, min(max_value, value))
 
 
+def _query_frame_format(request: web.Request) -> int:
+    raw = (request.query.get("format") or request.query.get("frame_format") or "raw").strip().lower()
+    return FRAME_FORMAT_CODES.get(raw, FRAME_FORMAT_RGBA8)
+
+
 async def alpha_ws(request):
     ws = web.WebSocketResponse(max_msg_size=0, compress=False)
     await ws.prepare(request)
     max_width = _query_int(request, "max_width")
     max_height = _query_int(request, "max_height")
     fps = _query_float(request, "fps")
-    await alpha_frame_hub.add_client(ws, max_width=max_width, max_height=max_height, fps=fps)
+    frame_format = _query_frame_format(request)
+    quality = _query_int(request, "quality", default=80, min_value=1, max_value=100)
+    await alpha_frame_hub.add_client(
+        ws,
+        max_width=max_width,
+        max_height=max_height,
+        fps=fps,
+        frame_format=frame_format,
+        quality=quality,
+    )
     logger.info(
-        "alpha raw video websocket connected peer=%s max_width=%d max_height=%d fps=%.1f",
+        "alpha video websocket connected peer=%s max_width=%d max_height=%d fps=%.1f format=%s quality=%d",
         request.remote,
         max_width,
         max_height,
         fps,
+        FRAME_FORMAT_NAMES.get(frame_format, str(frame_format)),
+        quality,
     )
     try:
         async for msg in ws:
@@ -396,7 +506,7 @@ async def alpha_ws(request):
                 break
     finally:
         alpha_frame_hub.remove_client(ws)
-        logger.info("alpha raw video websocket disconnected peer=%s", request.remote)
+        logger.info("alpha video websocket disconnected peer=%s", request.remote)
     return ws
 
 

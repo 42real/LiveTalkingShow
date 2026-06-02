@@ -55,7 +55,9 @@ class PlayerStreamTrack(MediaStreamTrack):
         super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
-        self._queue = queue.Queue(maxsize=100)
+        queue_size = 2 if kind == "video" else 100
+        self._queue = queue.Queue(maxsize=queue_size)
+        self._dropped = 0
         self.timelist = [] #记录最近包的时间戳
         self.current_frame_count = 0
         if self.kind == 'video':
@@ -185,7 +187,11 @@ class HumanPlayer:
 
         self.__container = avatar_session
         if hasattr(self.__container, 'output'):
-            self.__container.output._player = self
+            output = self.__container.output
+            if hasattr(output, "attach_player"):
+                output.attach_player(self)
+            else:
+                output._player = self
 
     def start(self) -> None:
         """Start the avatar render worker proactively."""
@@ -210,19 +216,40 @@ class HumanPlayer:
             self.__thread.join(timeout=3)
             self.__thread = None
             self.__thread_quit = None
+        if self.__container is not None and hasattr(self.__container, "output"):
+            output = self.__container.output
+            if hasattr(output, "detach_player"):
+                output.detach_player(self)
+            elif getattr(output, "_player", None) is self:
+                output._player = None
         self.__container = None
 
     def push_video(self, frame):
         from av import VideoFrame
         new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
-        self.__video._queue.put((new_frame, None))
+        video_queue = self.__video._queue
+        while video_queue.full():
+            try:
+                video_queue.get_nowait()
+                self.__video._dropped += 1
+            except queue.Empty:
+                break
+        video_queue.put((new_frame, None))
 
     def push_audio(self, frame, eventpoint=None):
         from av import AudioFrame
         new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
         new_frame.planes[0].update(frame.tobytes())
         new_frame.sample_rate = 16000
-        self.__audio._queue.put((new_frame, eventpoint))
+        try:
+            self.__audio._queue.put((new_frame, eventpoint), timeout=0.02)
+        except queue.Full:
+            try:
+                self.__audio._queue.get_nowait()
+                self.__audio._dropped += 1
+            except queue.Empty:
+                pass
+            self.__audio._queue.put((new_frame, eventpoint))
 
     def get_buffer_size(self) -> int:
         return self.__video._queue.qsize()
