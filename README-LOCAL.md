@@ -637,7 +637,36 @@ WebSocket binary PCM16 chunks，16kHz mono
 
 通常只让一个地方播放声音。如果 TTS 服务或业务组件已经播放音频，overlay 和 Web 页应关闭 `/alpha/audio` 播放，避免重复声音。
 
-### 4.6 远程透明 WebRTC 输出
+### 4.6 alpha 贴回区域调试
+
+`/alpha/tuning` 用于调试 Wav2Lip 输出贴回原图时的人脸区域。它只影响当前 alpha session 的运行时贴回区域，不会改写 `data/avatars/<avatar_id>/coords.pkl`，也不会重新生成 avatar。
+
+接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/alpha/tuning` | 返回当前 session 的 `pads`、原始人脸框 `base_bbox` 和实际贴回框 `padded_bbox`。 |
+| `POST` | `/alpha/tuning` | 更新当前 session 的运行时 `pads`。 |
+
+`pads` 顺序固定为：
+
+```text
+[top, bottom, left, right]
+```
+
+含义是基于 `coords.pkl` 中的人脸框做运行时扩缩。正数会扩大对应方向，负数会缩小对应方向。当前实现会把每个值限制在 `-300` 到 `300`，但实际调试建议从 `-50` 到 `100` 之间小步调整。过大的负数容易裁掉嘴部，过大的正数会把 Wav2Lip 生成结果贴到头发、眼镜或背景上。
+
+请求示例：
+
+```bash
+curl -X POST http://127.0.0.1:8050/alpha/tuning \
+  -H "Content-Type: application/json" \
+  -d '{"pads":[0,20,0,0]}'
+```
+
+这个接口主要适用于 `wav2lip` avatar。MuseTalk 有自己的 mask 和融合逻辑，不应直接套用这组参数。
+
+### 4.7 远程透明 WebRTC 输出
 
 `/alpha/ws` 的 raw RGBA 很适合同机 overlay，但跨机器时带宽会很大；`jpeg` 又会丢透明。远程透明显示推荐使用 packed WebRTC：
 
@@ -857,6 +886,17 @@ wav2lip 制作参数：
 - `full_imgs` 可以是 RGBA PNG。
 - `face_imgs` 可保留 alpha，但最终透明效果主要由 `full_imgs` 画布 alpha 决定。
 - `/alpha/ws` 输出 raw RGBA；普通 WebRTC 页面仍按普通视频显示。
+
+绿幕视频可先用仓库内的辅助脚本转成 RGBA PNG 序列：
+
+```bash
+uv run --python .venv/bin/python python tools/chroma_key_video.py \
+  --input /path/to/green-screen.mp4 \
+  --out-dir tmp/green_avatar_alpha_frames \
+  --preview tmp/green_avatar_alpha_preview.png
+```
+
+该脚本使用 HSV 绿色范围和边缘连通区域抠掉背景，并生成一张预览图。它适合背景是绿幕、主体没有大面积绿色的素材；如果人物衣服、道具或反光区域接近绿色，需要先检查 `--preview` 输出，必要时调整脚本阈值或改用专业抠像工具。生成出的 PNG 序列可以作为 `avatars.wav2lip.genavatar --video_path` 输入。
 
 ### 6.2 MuseTalk
 
