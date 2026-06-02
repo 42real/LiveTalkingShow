@@ -343,6 +343,16 @@ ws://127.0.0.1:8050/alpha/ws?max_height=720&fps=8
 
 Web 页面只用于测试和控制，不负责真正的桌面置顶显示。要叠在 PPT 上显示数字人，使用 overlay 或自研显示端消费 `/alpha/ws`。
 
+### 4.2 Web 调试面板
+
+Web 页面包含一组仅用于调试的显示控件：
+
+- `贴回区域`：读取和更新 LiveTalking 的 `/alpha/tuning`。参数顺序为 `top, bottom, left, right`，用于临时扩大或缩小 Wav2Lip 结果贴回区域。
+- `显示区域`：在预览画布上显示原始人脸框和实际贴回框，便于判断嘴型偏上、偏下或贴回范围过大。
+- `清晰度`：浏览器侧的显示锐化，只影响当前 Web 预览，不改变后端推理结果和 avatar 文件。
+
+`/alpha/tuning` 只影响当前 alpha session 的运行时状态，不会写回 `coords.pkl`。如果确认某组参数更合适，应重新用 `avatars.wav2lip.genavatar --pads ...` 生成 avatar，或者把该参数记录到部署说明中。该调试面板主要服务 `wav2lip` 模型；MuseTalk 的融合逻辑不同，不建议用它判断 MuseTalk 的最终效果。
+
 ## 5. 启动桌面 Overlay
 
 ```bash

@@ -354,6 +354,38 @@ async def alpha_close(request):
         return json_error(str(e))
 
 
+async def alpha_tuning(request):
+    """Read or update runtime visual tuning for the alpha avatar session."""
+    try:
+        if request.method == "POST":
+            params = await read_json_params(request)
+        else:
+            params = dict(request.rel_url.query)
+
+        requested_sessionid = str(params.get("sessionid", "")).strip() or None
+        sessionid = requested_sessionid or session_manager.default_alpha_sessionid
+        if not sessionid:
+            sessionid = await session_manager.get_or_create_alpha_session({}, None)
+        avatar_session = get_session(request, sessionid)
+        if avatar_session is None:
+            return json_error("session not found")
+
+        pads = params.get("pads")
+        if pads is None:
+            pads = [params.get("top", 0), params.get("bottom", 0), params.get("left", 0), params.get("right", 0)]
+        if request.method == "POST" and hasattr(avatar_session, "set_runtime_pads"):
+            avatar_session.set_runtime_pads(pads)
+
+        if not hasattr(avatar_session, "get_runtime_config"):
+            return json_error("current avatar does not support tuning")
+        data = avatar_session.get_runtime_config()
+        data["sessionid"] = sessionid
+        return json_ok(data=data)
+    except Exception as e:
+        logger.exception('alpha_tuning exception:')
+        return json_error(str(e))
+
+
 async def alpha_audio_input_ws(request):
     """Receive robot-tts task audio and feed the default alpha avatar session."""
     ws = web.WebSocketResponse(max_msg_size=0, compress=False)
@@ -524,6 +556,8 @@ def setup_routes(app):
     app.router.add_post("/alpha/session", alpha_session)
     app.router.add_post("/alpha/speak", alpha_speak)
     app.router.add_post("/alpha/close", alpha_close)
+    app.router.add_get("/alpha/tuning", alpha_tuning)
+    app.router.add_post("/alpha/tuning", alpha_tuning)
     app.router.add_get("/alpha/ws", alpha_ws)
     app.router.add_get("/alpha/audio", alpha_audio_ws)
     app.router.add_get("/alpha/input/audio", alpha_audio_input_ws)
