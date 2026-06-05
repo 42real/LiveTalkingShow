@@ -25,8 +25,8 @@ const DEFAULTS = {
   liveTalkingUrl: URL_PARAMS.get('live') || DEFAULT_LIVETALKING_URL,
   sessionId: URL_PARAMS.get('sessionid') || '',
   avatarId: URL_PARAMS.get('avatar_id') || 'mute_teacher_motion_v1_pad01000',
-  source: URL_PARAMS.get('source') || 'G:/数字人/数字人原型/视频素材/生成哑巴老师上课视频-优秀，但是动作不行.mp4',
-  ffmpegPath: 'G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffmpeg.exe'
+  source: URL_PARAMS.get('source') || '',
+  ffmpegPath: 'ffmpeg'
 };
 const INITIAL_CLIP_KIND = URL_PARAMS.get('kind') === 'idle' ? 'idle' : 'speaking';
 const PAD_FIELDS = [
@@ -148,6 +148,10 @@ function normalizeActionId(value) {
   return String(value || '').trim();
 }
 
+function isValidActionId(value) {
+  return /^[A-Za-z0-9_-]+$/.test(normalizeActionId(value));
+}
+
 function makeUniqueActionId(baseValue, usedIds) {
   const base = normalizeActionId(baseValue) || 'lecture_action';
   if (!usedIds.has(base)) return base;
@@ -229,6 +233,7 @@ function App() {
   );
   const draftActionId = normalizeActionId(draft.actionId);
   const draftConflict = draftActionId && allUsedActionIds.has(draftActionId);
+  const draftIdInvalid = draftActionId && !isValidActionId(draftActionId);
   const hasSegmentConflict = useMemo(() => {
     const seen = new Set();
     for (const segment of segments) {
@@ -575,6 +580,10 @@ function App() {
       addLog('请填写片段 id');
       return;
     }
+    if (!isValidActionId(actionId)) {
+      addLog('片段 id 只能用英文、数字、下划线和短横线，中文可以写在片段名称里', { action_id: draft.actionId });
+      return;
+    }
     if (endMark <= startMark) {
       addLog('结束点需要大于开始点');
       return;
@@ -627,11 +636,16 @@ function App() {
       addLog('片段 id 不能为空');
       return;
     }
+    const actionId = normalizeActionId(segment.actionId);
+    if (!isValidActionId(actionId)) {
+      setStatus('片段 id 格式不对');
+      addLog('片段 id 只能用英文、数字、下划线和短横线，中文可以写在片段名称里', { action_id: segment.actionId });
+      return;
+    }
     if (toNumber(segment.end) <= toNumber(segment.start)) {
       addLog('片段结束点需要大于开始点', segment);
       return;
     }
-    const actionId = normalizeActionId(segment.actionId);
     const sameQueuedCount = segments.filter((item) => normalizeActionId(item.actionId) === actionId).length;
     const isDraftSegment = segment.localId === 'draft';
     if (existingActionIds.has(actionId) || (!isDraftSegment && sameQueuedCount > 1)) {
@@ -731,7 +745,7 @@ function App() {
                 <input
                   value={settings.source}
                   onChange={(event) => setSetting('source', event.target.value)}
-                  placeholder="G:/数字人/数字人原型/视频素材/xxx.mp4"
+                  placeholder="先选择视频上传，或者填写允许目录内的服务器视频路径"
                 />
               </label>
               <input
@@ -859,6 +873,7 @@ function App() {
               <label>
                 片段 id
                 <input value={draft.actionId} onChange={(event) => setDraftField('actionId', event.target.value)} />
+                {draftIdInvalid && <span className="fieldHint dangerHint">片段 id 只能用英文、数字、下划线和短横线，中文请写在片段名称里。</span>}
                 {draftConflict && <span className="fieldHint dangerHint">这个 action_id 已经在素材库或者队列里了，加入队列时会自动改名，直接生成需要先换名。</span>}
               </label>
               <label>
@@ -880,7 +895,7 @@ function App() {
               <button type="button" onClick={addSegment} disabled={!sourceInfo}>
                 <ListPlus size={16} />加入队列
               </button>
-              <button type="button" onClick={generateDraft} disabled={!sourceInfo || busy === 'draft' || !!draftConflict}>
+              <button type="button" onClick={generateDraft} disabled={!sourceInfo || busy === 'draft' || !!draftConflict || !!draftIdInvalid}>
                 <Save size={16} />{busy === 'draft' ? '生成中' : '直接生成'}
               </button>
             </div>
@@ -1003,19 +1018,21 @@ function App() {
                 const segmentActionId = normalizeActionId(segment.actionId);
                 const repeatedInQueue = segments.filter((item) => normalizeActionId(item.actionId) === segmentActionId).length > 1;
                 const segmentConflict = existingActionIds.has(segmentActionId) || repeatedInQueue;
+                const segmentIdInvalid = segmentActionId && !isValidActionId(segmentActionId);
                 return (
-                  <div className={`segmentCard${segmentConflict ? ' segmentCardWarning' : ''}`} key={segment.localId}>
+                  <div className={`segmentCard${segmentConflict || segmentIdInvalid ? ' segmentCardWarning' : ''}`} key={segment.localId}>
                     <div className="segmentFields">
                       <input value={segment.actionId} onChange={(event) => updateSegment(segment.localId, 'actionId', event.target.value)} />
                       <input value={segment.displayName} onChange={(event) => updateSegment(segment.localId, 'displayName', event.target.value)} />
                       <input type="number" step="0.01" value={segment.start} onChange={(event) => updateSegment(segment.localId, 'start', event.target.value)} />
                       <input type="number" step="0.01" value={segment.end} onChange={(event) => updateSegment(segment.localId, 'end', event.target.value)} />
                     </div>
+                    {segmentIdInvalid && <span className="fieldHint dangerHint">片段 id 只能用英文、数字、下划线和短横线，中文请写在片段名称里。</span>}
                     {segmentConflict && <span className="fieldHint dangerHint">这个 action_id 已经存在，请换一个名字再生成。</span>}
                     <div className="segmentActions">
                       <span>{formatTime(segment.start)} - {formatTime(segment.end)} / {clipDuration(segment.start, segment.end)} 秒</span>
                       {segment.generated && <span className="doneText"><CheckCircle2 size={14} />已生成</span>}
-                      <button type="button" onClick={() => generateSegment(segment)} disabled={!!busy || segmentConflict}>
+                      <button type="button" onClick={() => generateSegment(segment)} disabled={!!busy || segmentConflict || segmentIdInvalid}>
                         <Save size={15} />{busy === segment.localId ? '生成中' : '生成'}
                       </button>
                       <button type="button" onClick={() => removeSegment(segment.localId)} disabled={!!busy}>

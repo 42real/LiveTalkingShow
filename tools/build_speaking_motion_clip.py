@@ -7,6 +7,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from shutil import which
 
 import cv2
 import numpy as np
@@ -22,7 +23,7 @@ from avatars.wav2lip import face_detection
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-DEFAULT_FFMPEG = Path("G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffmpeg.exe")
+DEFAULT_FFMPEG = which("ffmpeg") or "ffmpeg"
 
 
 def write_png(path: Path, image: np.ndarray) -> None:
@@ -171,12 +172,8 @@ def load_source_frames(
 def cut_source_video(source: Path, target: Path, start: float, end: float | None, ffmpeg_path: str) -> Path:
     import subprocess
 
-    ffmpeg = Path(ffmpeg_path) if ffmpeg_path else DEFAULT_FFMPEG
-    if not ffmpeg.exists():
-        raise RuntimeError(f"ffmpeg not found: {ffmpeg}")
-
     target.parent.mkdir(parents=True, exist_ok=True)
-    command = [str(ffmpeg), "-y"]
+    command = [str(ffmpeg_path or DEFAULT_FFMPEG), "-y"]
     if start > 0:
         command.extend(["-ss", str(start)])
     command.extend(["-i", str(source)])
@@ -393,7 +390,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--best-for", default="")
     parser.add_argument("--chroma-key", action="store_true")
     parser.add_argument("--use-ffmpeg-cut", action="store_true")
-    parser.add_argument("--ffmpeg-path", default=str(DEFAULT_FFMPEG))
+    parser.add_argument("--ffmpeg-path", default=DEFAULT_FFMPEG)
     parser.add_argument("--nosmooth", action="store_true")
     parser.add_argument("--no-loop", action="store_true")
     parser.add_argument("--overwrite", action="store_true")

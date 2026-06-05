@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from shutil import which
 from types import SimpleNamespace
 from typing import Optional
 from urllib.parse import urlencode
@@ -54,6 +55,9 @@ from server.avatar_routes import setup_avatar_routes
 _motion_face_detector = None
 _motion_face_detector_device = ""
 _motion_face_detector_lock = threading.Lock()
+MOTION_UPLOAD_MAX_BYTES = int(os.getenv("MOTION_UPLOAD_MAX_BYTES", str(512 * 1024 * 1024)))
+MOTION_ALLOWED_SOURCE_DIRS = ("tmp/uploaded_sources", "data")
+MOTION_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 
 
 @dataclass
@@ -95,6 +99,8 @@ def _clean_motion_id(value: str, field_name: str) -> str:
         raise ValueError(f"{field_name} is required")
     if ".." in cleaned or "/" in cleaned or "\\" in cleaned:
         raise ValueError(f"{field_name} must be a simple id")
+    if not re.fullmatch(r"[0-9A-Za-z_-]+", cleaned):
+        raise ValueError(f"{field_name} may only contain letters, numbers, underscores, and hyphens")
     return cleaned
 
 
@@ -127,6 +133,47 @@ def _motion_root_for_kind(kind: str) -> str:
     return "data/idle_actions" if kind == "idle" else "data/speaking_actions"
 
 
+def _motion_output_root(kind: str, out_root: str = "") -> Path:
+    default_root = _motion_root_for_kind(kind)
+    raw_root = str(out_root or default_root).strip() or default_root
+    allowed = {default_root, "data/idle_actions", "data/speaking_actions"}
+    normalized = raw_root.replace("\\", "/").rstrip("/")
+    if normalized not in allowed:
+        raise ValueError("out_root is not allowed")
+    root = Path(raw_root)
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    return root.resolve()
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _motion_allowed_source_roots() -> list[Path]:
+    raw_dirs = os.getenv("MOTION_ALLOWED_SOURCE_DIRS", "")
+    entries = [item.strip() for item in raw_dirs.split(os.pathsep) if item.strip()]
+    entries.extend(MOTION_ALLOWED_SOURCE_DIRS)
+    roots = []
+    for entry in entries:
+        root = Path(entry)
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        roots.append(root.resolve())
+    return roots
+
+
+def _ensure_motion_source_allowed(source_path: Path) -> None:
+    allowed_roots = _motion_allowed_source_roots()
+    if not any(_path_is_relative_to(source_path, root) for root in allowed_roots):
+        allowed = ", ".join(str(root) for root in allowed_roots)
+        raise PermissionError(f"source path is not allowed. allowed roots: {allowed}")
+
+
 def _motion_source_path(source: str) -> Path:
     raw_source = str(source or "").strip()
     if not raw_source:
@@ -137,7 +184,15 @@ def _motion_source_path(source: str) -> Path:
     source_path = source_path.resolve()
     if not source_path.exists():
         raise FileNotFoundError(f"source not found: {source_path}")
+    _ensure_motion_source_allowed(source_path)
     return source_path
+
+
+def _ensure_motion_video_file(source_path: Path) -> None:
+    if source_path.is_dir():
+        raise ValueError("source must be a video file")
+    if source_path.suffix.lower() not in MOTION_VIDEO_SUFFIXES:
+        raise ValueError("only video files are supported")
 
 
 def _safe_upload_filename(filename: str) -> str:
@@ -148,13 +203,29 @@ def _safe_upload_filename(filename: str) -> str:
     return f"{safe_stem}{suffix}"
 
 
+def _find_executable(name: str, configured: str = "") -> str:
+    configured = str(configured or "").strip()
+    if configured:
+        path = Path(configured)
+        if path.exists():
+            return str(path)
+    found = which(name)
+    return found or name
+
+
+def _default_ffmpeg_path(configured: str = "") -> str:
+    return _find_executable("ffmpeg", configured or os.getenv("FFMPEG_PATH", ""))
+
+
 def _default_ffprobe_path(ffmpeg_path: str = "") -> str:
-    if ffmpeg_path:
+    configured = os.getenv("FFPROBE_PATH", "")
+    if not configured and ffmpeg_path:
         path = Path(ffmpeg_path)
-        probe = path.with_name("ffprobe.exe")
+        probe_name = "ffprobe.exe" if path.suffix.lower() == ".exe" else "ffprobe"
+        probe = path.with_name(probe_name)
         if probe.exists():
-            return str(probe)
-    return "G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffprobe.exe"
+            configured = str(probe)
+    return _find_executable("ffprobe", configured)
 
 
 def _parse_fps(value: str) -> float:
@@ -297,6 +368,7 @@ def _get_motion_face_detector():
 
 def _detect_motion_preview(source: str, pads: list[int], time_sec: float, chroma_key: bool) -> dict:
     source_path = _motion_source_path(source)
+    _ensure_motion_video_file(source_path)
 
     from tools.build_speaking_motion_clip import chroma_key_green, frame_for_detection
 
@@ -510,8 +582,12 @@ def _call_motion_plan_llm(text: str, clips: list[dict], max_segments: int = 8) -
     if not api_key:
         raise RuntimeError("MOTION_LLM_API_KEY is not configured")
 
-    base_url = (os.getenv("MOTION_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.ikuncode.cc/v1").rstrip("/")
-    model = os.getenv("MOTION_LLM_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.4"
+    base_url = (os.getenv("MOTION_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
+    model = os.getenv("MOTION_LLM_MODEL") or os.getenv("OPENAI_MODEL") or ""
+    if not base_url:
+        raise RuntimeError("MOTION_LLM_BASE_URL is not configured")
+    if not model:
+        raise RuntimeError("MOTION_LLM_MODEL is not configured")
     timeout = float(os.getenv("MOTION_LLM_TIMEOUT", "30") or 30)
     clip_payload = [_compact_motion_clip(clip) for clip in clips if clip.get("action_id")]
     system_prompt = (
@@ -877,7 +953,7 @@ async def motion_clips(request):
         avatar_session = get_session(request, sessionid) if sessionid else None
         if avatar_session is None:
             avatar_id = _clean_motion_id(params.get("avatar_id", os.getenv("AVATAR_ID", "")), "avatar_id")
-            out_root = str(params.get("out_root", _motion_root_for_kind(kind))).strip() or _motion_root_for_kind(kind)
+            out_root = str(_motion_output_root(kind, params.get("out_root", "")))
             return json_ok(data={
                 "sessionid": sessionid,
                 "kind": kind,
@@ -956,6 +1032,7 @@ async def motion_source_probe(request):
     try:
         params = await read_json_params(request)
         source_path = _motion_source_path(params.get("source", ""))
+        _ensure_motion_video_file(source_path)
         ffprobe_path = str(params.get("ffprobe_path", "")).strip() or _default_ffprobe_path(params.get("ffmpeg_path", ""))
         data = await asyncio.to_thread(_probe_video_source, source_path, ffprobe_path)
         data["video_url"] = f"/motion/source/video?{urlencode({'source': str(source_path)})}"
@@ -969,8 +1046,7 @@ async def motion_source_video(request):
     """Serve a local source video for the motion clip maker page."""
     try:
         source_path = _motion_source_path(request.rel_url.query.get("source", ""))
-        if source_path.is_dir():
-            return json_error("source must be a video file")
+        _ensure_motion_video_file(source_path)
         headers = {"Cache-Control": "no-store"}
         return web.FileResponse(path=source_path, headers=headers)
     except Exception as e:
@@ -988,7 +1064,7 @@ async def motion_source_upload(request):
 
         filename = _safe_upload_filename(field.filename or "source.mp4")
         suffix = Path(filename).suffix.lower()
-        if suffix not in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
+        if suffix not in MOTION_VIDEO_SUFFIXES:
             return json_error("only video files are supported")
 
         upload_dir = Path("tmp") / "uploaded_sources"
@@ -1002,6 +1078,9 @@ async def motion_source_upload(request):
                 if not chunk:
                     break
                 size += len(chunk)
+                if size > MOTION_UPLOAD_MAX_BYTES:
+                    target_path.unlink(missing_ok=True)
+                    return json_error(f"uploaded file is too large. max bytes: {MOTION_UPLOAD_MAX_BYTES}")
                 file.write(chunk)
 
         if size <= 0:
@@ -1076,7 +1155,7 @@ async def motion_update_clip(request):
         avatar_id = _motion_avatar_id(params, avatar_session)
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
         next_action_id = _clean_motion_id(params.get("next_action_id", action_id), "next_action_id")
-        out_root = str(params.get("out_root", _motion_root_for_kind(kind))).strip() or _motion_root_for_kind(kind)
+        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
 
         root = Path(out_root) / avatar_id
         source_dir = root / action_id
@@ -1151,12 +1230,9 @@ async def motion_delete_clip(request):
         avatar_session = get_session(request, sessionid) if sessionid else None
         avatar_id = _motion_avatar_id(params, avatar_session)
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
-        out_root = str(params.get("out_root", _motion_root_for_kind(kind))).strip() or _motion_root_for_kind(kind)
+        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
 
-        root = Path(out_root)
-        if not root.is_absolute():
-            root = Path.cwd() / root
-        root = (root / avatar_id).resolve()
+        root = (Path(out_root) / avatar_id).resolve()
         target_dir = (root / action_id).resolve()
         if root not in target_dir.parents:
             return json_error("invalid motion clip path")
@@ -1211,11 +1287,13 @@ async def motion_create_clip(request):
         avatar_id = _clean_motion_id(avatar_id, "avatar_id")
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
 
-        source = str(params.get("source", "")).strip()
+        source_path = _motion_source_path(params.get("source", ""))
+        _ensure_motion_video_file(source_path)
+        source = str(source_path)
         if not source:
             return json_error("source is required")
 
-        out_root = str(params.get("out_root", _motion_root_for_kind(kind))).strip() or _motion_root_for_kind(kind)
+        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
         target_dir = Path(out_root) / avatar_id / action_id
         if target_dir.exists() and not (target_dir / "metadata.json").exists():
             logger.info("remove incomplete motion clip before rebuild: %s", target_dir)
@@ -1257,7 +1335,7 @@ async def motion_create_clip(request):
             best_for=str(params.get("best_for", "")),
             chroma_key=bool(params.get("chroma_key", False)),
             use_ffmpeg_cut=bool(params.get("use_ffmpeg_cut", False)),
-            ffmpeg_path=str(params.get("ffmpeg_path", "G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffmpeg.exe")),
+            ffmpeg_path=_default_ffmpeg_path(params.get("ffmpeg_path", "")),
             nosmooth=bool(params.get("nosmooth", False)),
             no_loop=bool(params.get("no_loop", False)),
             overwrite=bool(params.get("overwrite", False)),

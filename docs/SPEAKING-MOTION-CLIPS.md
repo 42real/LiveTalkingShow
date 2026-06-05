@@ -36,7 +36,7 @@ data/idle_actions/<avatar_id>/<action_id>/
 
 ```powershell
 python tools\build_speaking_motion_clip.py `
-  --source "G:\数字人\数字人原型\视频素材\生成哑巴老师上课视频-优秀，但是动作不行.mp4" `
+  --source "tmp/uploaded_sources/source.mp4" `
   --avatar-id mute_teacher_motion_v1_pad01000 `
   --action-id lecture_explain `
   --display-name 普通讲解 `
@@ -47,7 +47,7 @@ python tools\build_speaking_motion_clip.py `
   --pads 0 10 0 0 `
   --face-det-batch-size 8 `
   --use-ffmpeg-cut `
-  --ffmpeg-path "G:\ffmpeg\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe" `
+  --ffmpeg-path "ffmpeg" `
   --chroma-key `
   --overwrite
 ```
@@ -80,7 +80,7 @@ python tools\build_speaking_motion_clip.py `
 先用 FFmpeg 按 start/end 截出一段临时视频，再进入拆帧和人脸检测。源视频较长，或者只想取中间一段动作时建议打开。
 
 --ffmpeg-path
-FFmpeg 可执行文件路径。当前本机路径是 G:\ffmpeg\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe。
+FFmpeg 可执行文件路径。默认从 PATH 查找，也可以用 --ffmpeg-path 或 FFMPEG_PATH 指定。
 
 --max-frames
 快速测试时可以限制帧数，正式生成时设为 0 或不填。
@@ -100,17 +100,17 @@ POST /motion/source/probe
 
 ```json
 {
-  "source": "G:/数字人/数字人原型/视频素材/生成哑巴老师上课视频-优秀，但是动作不行.mp4",
-  "ffmpeg_path": "G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffmpeg.exe"
+  "source": "tmp/uploaded_sources/source.mp4",
+  "ffmpeg_path": "ffmpeg"
 }
 ```
 
-接口会返回 `video_url`，制作页会用这个地址预览本地视频。浏览器不能直接播放后端机器上的 `G:\...` 路径，所以这里需要先让后端把这个视频文件提供出来。
+接口会返回 `video_url`，制作页会用这个地址预览视频。`source` 只能来自允许目录，默认允许 `tmp/uploaded_sources` 和 `data`。
 
 预览本地视频：
 
 ```http
-GET /motion/source/video?source=<本地视频路径>
+GET /motion/source/video?source=<允许目录内的视频路径>
 ```
 
 查看当前 session 已加载的动作片段：
@@ -165,7 +165,7 @@ POST /motion/clips/create
 {
   "sessionid": "当前 session id",
   "kind": "speaking",
-  "source": "G:/数字人/数字人原型/视频素材/生成哑巴老师上课视频-优秀，但是动作不行.mp4",
+  "source": "tmp/uploaded_sources/source.mp4",
   "action_id": "lecture_explain",
   "display_name": "普通讲解",
   "start": 0,
@@ -176,7 +176,7 @@ POST /motion/clips/create
   "face_det_batch_size": 8,
   "chroma_key": true,
   "use_ffmpeg_cut": true,
-  "ffmpeg_path": "G:/ffmpeg/ffmpeg-8.1-essentials_build/bin/ffmpeg.exe",
+  "ffmpeg_path": "ffmpeg",
   "overwrite": false
 }
 ```
