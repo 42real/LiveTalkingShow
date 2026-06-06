@@ -48,6 +48,16 @@ LiveTalking JSON 响应：
 | --- | --- | --- | --- |
 | `GET` | `/alpha/tuning` | JSON | 查询 Wav2Lip 运行时贴回区域参数。 |
 | `POST` | `/alpha/tuning` | JSON | 更新 Wav2Lip 运行时贴回区域参数。 |
+| `GET` | `/motion/clips` | JSON | 查询说话动作或静息动作素材。 |
+| `POST` | `/motion/plan` | JSON | 根据文本生成动作编排计划。 |
+| `POST` | `/motion/source/upload` | multipart | 上传动作素材源视频。 |
+| `POST` | `/motion/source/probe` | JSON | 读取源视频时长、帧率和预览地址。 |
+| `POST` | `/motion/source/detect` | JSON | 检测源视频首帧人脸框和生成框。 |
+| `GET` | `/motion/source/video` | file | 预览允许目录内的源视频。 |
+| `POST` | `/motion/select` | JSON | 选择当前 session 使用的动作素材。 |
+| `POST` | `/motion/clips/create` | JSON | 从源视频生成动作素材。 |
+| `POST` | `/motion/clips/update` | JSON | 修改动作素材元信息。 |
+| `POST` | `/motion/clips/delete` | JSON | 删除动作素材。 |
 | `GET` | `/api/admin/config` | JSON | 查看启动配置（返回 `vars(opt)` 全量配置字典）。 |
 | `GET` | `/api/admin/sessions` | JSON | 查看活跃 session（返回 `sessionid`、`speaking`、`recording`、`model`、`avatar_id`、`REF_FILE`、`transport`、`batch_size`、`customopt` 等字段）。 |
 | `POST` | `/api/avatar/task` | JSON/multipart | 创建 avatar 制作任务。 |
@@ -446,7 +456,211 @@ POST 也可以使用独立字段：
 
 仅 Wav2Lip 模型支持运行时调优，其他模型返回 `"current avatar does not support tuning"` 错误。
 
-## 7. WebRTC 输出
+## 7. 动作素材接口
+
+动作素材接口用于把一段源视频切成可复用的说话动作或静息动作。说话动作保存在 `data/speaking_actions/<avatar_id>/<action_id>`，静息动作保存在 `data/idle_actions/<avatar_id>/<action_id>`。
+
+安全限制：
+
+- `source` 只能指向允许目录内的文件，默认允许 `tmp/uploaded_sources` 和 `data`。
+- 可以用 `MOTION_ALLOWED_SOURCE_DIRS` 调整允许目录，多个目录使用系统路径分隔符。
+- 上传文件大小默认不超过 `MOTION_UPLOAD_MAX_BYTES=536870912`。
+- `ffmpeg` 和 `ffprobe` 默认从 `PATH` 查找，也可以用 `FFMPEG_PATH`、`FFPROBE_PATH` 或请求参数指定。
+- `action_id`、`avatar_id` 只能是简单目录名，不能包含路径分隔符或 `..`。
+
+查询素材：
+
+```http
+GET /motion/clips?sessionid=123456&kind=speaking&reload=1
+```
+
+query：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `sessionid` | 默认 alpha session | 目标 session。存在 session 时返回该 session 当前加载的素材。 |
+| `kind` | `speaking` | `speaking` 表示说话动作，`idle` 表示静息动作。 |
+| `avatar_id` | 启动配置 | 没有 session 时用于从磁盘列出指定 avatar 的素材。 |
+| `reload` | `0` | `1` 表示让当前 session 重新从磁盘读取素材。 |
+
+返回中的每个素材会包含 `action_id`、`display_name`、`fps`、`frame_count`、`img_size`、`pads`、`tags`、`best_for`、`current` 等字段。
+
+上传源视频：
+
+```http
+POST /motion/source/upload
+Content-Type: multipart/form-data
+```
+
+表单字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `file` | 视频文件，支持 `.mp4`、`.mov`、`.webm`、`.mkv`、`.avi`。 |
+
+返回：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "source": "/abs/path/to/tmp/uploaded_sources/source.mp4",
+    "filename": "source.mp4",
+    "size": 123456
+  }
+}
+```
+
+读取源视频信息：
+
+```http
+POST /motion/source/probe
+Content-Type: application/json
+```
+
+```json
+{
+  "source": "/abs/path/to/tmp/uploaded_sources/source.mp4",
+  "ffmpeg_path": "ffmpeg"
+}
+```
+
+返回会包含 `duration`、`fps`、`width`、`height`、`frame_count`、`video_url`。`video_url` 可用于浏览器预览。
+
+预览源视频：
+
+```http
+GET /motion/source/video?source=/abs/path/to/tmp/uploaded_sources/source.mp4
+```
+
+该接口只返回允许目录内的视频文件，不能用来读取服务器上的任意本地文件。
+
+检测首帧人脸框：
+
+```http
+POST /motion/source/detect
+Content-Type: application/json
+```
+
+```json
+{
+  "source": "/abs/path/to/tmp/uploaded_sources/source.mp4",
+  "time": 0,
+  "pads": [0, 10, 0, 0],
+  "chroma_key": true
+}
+```
+
+返回会包含 `base_box`、`padded_box`、`width`、`height`、`preview`。前端用它画“检测框”和“生成框”。
+
+生成动作素材：
+
+```http
+POST /motion/clips/create
+Content-Type: application/json
+```
+
+```json
+{
+  "sessionid": "123456",
+  "avatar_id": "teacher_avatar",
+  "kind": "speaking",
+  "source": "/abs/path/to/tmp/uploaded_sources/source.mp4",
+  "action_id": "lecture_explain",
+  "display_name": "普通讲解",
+  "start": 0,
+  "end": 4,
+  "fps": 15,
+  "img_size": 256,
+  "pads": [0, 10, 0, 0],
+  "face_det_batch_size": 8,
+  "max_frames": 0,
+  "tags": "speaking,teaching",
+  "best_for": "讲解知识点",
+  "chroma_key": true,
+  "use_ffmpeg_cut": true,
+  "ffmpeg_path": "ffmpeg"
+}
+```
+
+说明：
+
+- `kind=speaking` 会写入 `data/speaking_actions`，`kind=idle` 会写入 `data/idle_actions`。
+- `max_frames=0` 表示不限制帧数。交互测试建议使用短素材，避免启动时一次性加载太多帧。
+- 如果请求里带了有效 `sessionid`，生成后会让该 session 重新加载对应素材。
+- 同名素材默认不覆盖，除非传入 `overwrite=true`。
+
+选择动作素材：
+
+```http
+POST /motion/select
+Content-Type: application/json
+```
+
+```json
+{
+  "sessionid": "123456",
+  "kind": "speaking",
+  "action_id": "lecture_explain"
+}
+```
+
+修改素材元信息：
+
+```http
+POST /motion/clips/update
+Content-Type: application/json
+```
+
+```json
+{
+  "sessionid": "123456",
+  "kind": "speaking",
+  "avatar_id": "teacher_avatar",
+  "action_id": "lecture_explain",
+  "next_action_id": "lecture_explain_01",
+  "display_name": "普通讲解",
+  "best_for": "讲解知识点",
+  "tags": "speaking,teaching"
+}
+```
+
+删除素材：
+
+```http
+POST /motion/clips/delete
+Content-Type: application/json
+```
+
+```json
+{
+  "sessionid": "123456",
+  "kind": "speaking",
+  "avatar_id": "teacher_avatar",
+  "action_id": "lecture_explain"
+}
+```
+
+动作编排：
+
+```http
+POST /motion/plan
+Content-Type: application/json
+```
+
+```json
+{
+  "sessionid": "123456",
+  "avatar_id": "teacher_avatar",
+  "text": "今天讲一元二次方程。",
+  "max_segments": 6
+}
+```
+
+如果配置了 `MOTION_LLM_API_KEY`、`MOTION_LLM_BASE_URL` 和 `MOTION_LLM_MODEL`，服务会调用大模型生成动作计划。如果没有配置，会使用规则兜底。
+
+## 8. WebRTC 输出
 
 普通 WebRTC：
 
@@ -540,7 +754,7 @@ video recvonly  alpha mask
 }
 ```
 
-## 8. avatar 任务
+## 9. avatar 任务
 
 创建：
 
@@ -610,7 +824,7 @@ pending -> running -> completed / failed
 
 只有 `pending` 状态任务可删除。
 
-## 9. robottts 兼容 TTS
+## 10. robottts 兼容 TTS
 
 这是 `testclient/backend` 提供的测试 TTS 协议。生产接真实 `robot-tts` 时应保持同等兼容。
 
@@ -747,7 +961,7 @@ Content-Type: application/json
 {"task_id": "demo-001"}
 ```
 
-## 10. 代码位置
+## 11. 代码位置
 
 | 功能 | 文件 |
 | --- | --- |
