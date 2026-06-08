@@ -29,7 +29,12 @@ const videoMaxHeight = envInt('LIVETALKING_VIDEO_MAX_HEIGHT', 0);
 const videoFps = envFloat('LIVETALKING_VIDEO_FPS', 0);
 const videoFormat = envFormat('LIVETALKING_VIDEO_FORMAT', 'raw');
 const videoQuality = envInt('LIVETALKING_VIDEO_QUALITY', 80);
+const outputMode = envOutputMode('LIVETALKING_OUTPUT', 'webrtc-packed');
 const logFile = path.join(__dirname, 'overlay-debug.log');
+
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
 
 function debugLog(scope, message, data) {
   const record = {
@@ -88,6 +93,13 @@ function envFormat(name, fallback) {
   return ['raw', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
 }
 
+function envOutputMode(name, fallback) {
+  const value = (process.env[name] || '').trim().toLowerCase();
+  if (['webrtc-packed', 'packed-webrtc', 'packed', 'webrtc'].includes(value)) return 'webrtc-packed';
+  if (['ws', 'websocket', 'raw'].includes(value)) return 'ws';
+  return fallback;
+}
+
 function createViewerWindow() {
   const initialWidth = envInt('LIVETALKING_WIDTH', 360);
   const initialHeight = envInt('LIVETALKING_HEIGHT', 640);
@@ -104,7 +116,8 @@ function createViewerWindow() {
     videoMaxHeight,
     videoFps,
     videoFormat,
-    videoQuality
+    videoQuality,
+    outputMode
   });
 
   viewerWindow = new BrowserWindow({
@@ -147,7 +160,8 @@ function createViewerWindow() {
     videoMaxHeight: String(videoMaxHeight),
     videoFps: String(videoFps),
     videoFormat,
-    videoQuality: String(videoQuality)
+    videoQuality: String(videoQuality),
+    output: outputMode
   });
   viewerWindow.loadFile('viewer.html', { search: `?${params.toString()}` });
 
@@ -419,6 +433,7 @@ app.whenReady().then(() => {
       LIVETALKING_PLAY_AUDIO: process.env.LIVETALKING_PLAY_AUDIO,
       LIVETALKING_SCALE: process.env.LIVETALKING_SCALE,
       LIVETALKING_RENDERER: process.env.LIVETALKING_RENDERER,
+      LIVETALKING_OUTPUT: process.env.LIVETALKING_OUTPUT,
       LIVETALKING_VIDEO_FORMAT: process.env.LIVETALKING_VIDEO_FORMAT,
       LIVETALKING_VIDEO_QUALITY: process.env.LIVETALKING_VIDEO_QUALITY
     }

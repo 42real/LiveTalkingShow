@@ -24,6 +24,33 @@ from avatars.wav2lip import face_detection
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 DEFAULT_FFMPEG = which("ffmpeg") or "ffmpeg"
+PLAY_MODES = {"forward", "pingpong", "reverse", "random_direction"}
+
+
+def normalize_play_mode(value: str, default: str = "forward") -> str:
+    play_mode = str(value or default).strip().lower()
+    return play_mode if play_mode in PLAY_MODES else default
+
+
+def infer_kind_from_out_root(out_root: str) -> str:
+    normalized = str(out_root or "").replace("\\", "/").rstrip("/")
+    return "idle" if normalized.endswith("idle_actions") else "speaking"
+
+
+def clamp_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def clamp_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def write_png(path: Path, image: np.ndarray) -> None:
@@ -92,9 +119,35 @@ def chroma_key_green(bgr: np.ndarray) -> np.ndarray:
 
 
 def frame_for_detection(frame: np.ndarray) -> np.ndarray:
+    if frame.ndim == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     if frame.ndim == 3 and frame.shape[2] == 4:
         return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    if frame.ndim == 3 and frame.shape[2] == 1:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     return frame
+
+
+def normalize_source_frame(frame: np.ndarray) -> np.ndarray:
+    if frame.ndim == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    if frame.ndim == 3 and frame.shape[2] == 1:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    if frame.ndim == 3 and frame.shape[2] in (3, 4):
+        return frame
+    raise RuntimeError(f"Unsupported source frame shape: {frame.shape}")
+
+
+def ensure_consistent_frames(frames: list[np.ndarray]) -> None:
+    if not frames:
+        return
+    base_shape = frames[0].shape
+    for index, frame in enumerate(frames[1:], start=1):
+        if frame.shape != base_shape:
+            raise RuntimeError(
+                f"All source frames must have the same shape. "
+                f"frame 0 is {base_shape}, frame {index} is {frame.shape}"
+            )
 
 
 def load_source_frames(
@@ -109,9 +162,10 @@ def load_source_frames(
         images = list_images(source)
         if not images:
             raise RuntimeError(f"No images found in: {source}")
-        frames = [read_image(path) for path in images]
+        frames = [normalize_source_frame(read_image(path)) for path in images]
         if max_frames > 0:
             frames = frames[:max_frames]
+        ensure_consistent_frames(frames)
         return frames, {
             "source_type": "image_dir",
             "source_fps": None,
@@ -150,7 +204,7 @@ def load_source_frames(
 
         if chroma_key:
             frame = chroma_key_green(frame)
-        frames.append(frame)
+        frames.append(normalize_source_frame(frame))
         next_sample_at += target_interval
 
         if max_frames > 0 and len(frames) >= max_frames:
@@ -159,6 +213,7 @@ def load_source_frames(
     cap.release()
     if not frames:
         raise RuntimeError("No frames selected from source")
+    ensure_consistent_frames(frames)
 
     return frames, {
         "source_type": "video",
@@ -217,8 +272,13 @@ def detect_boxes(
         predictions = []
         try:
             for index in tqdm(range(0, len(detect_frames), current_batch_size), desc="detect faces"):
-                batch = np.asarray(detect_frames[index : index + current_batch_size])
-                predictions.extend(detector.get_detections_for_batch(batch))
+                batch_frames = detect_frames[index : index + current_batch_size]
+                if len({frame.shape for frame in batch_frames}) == 1:
+                    batch = np.asarray(batch_frames)
+                    predictions.extend(detector.get_detections_for_batch(batch))
+                else:
+                    for frame in batch_frames:
+                        predictions.extend(detector.get_detections_for_batch(np.asarray([frame])))
         except RuntimeError:
             if current_batch_size == 1:
                 raise
@@ -342,10 +402,15 @@ def build_clip(args: argparse.Namespace) -> None:
     preview = make_preview(frames[preview_frame_index], boxes[preview_frame_index], args.action_id)
     write_png(preview_path, preview)
 
+    min_cycles = clamp_int(getattr(args, "min_cycles", 1), 1, 1, 100)
+    max_cycles = clamp_int(getattr(args, "max_cycles", min_cycles), min_cycles, 1, 100)
+    if max_cycles < min_cycles:
+        max_cycles = min_cycles
     metadata = {
         "action_id": args.action_id,
         "display_name": args.display_name or args.action_id,
         "avatar_id": args.avatar_id,
+        "kind": infer_kind_from_out_root(args.out_root),
         "source": str(source),
         "cut_video": str(cut_video_path) if cut_video_path else "",
         "source_info": source_info,
@@ -358,6 +423,13 @@ def build_clip(args: argparse.Namespace) -> None:
         "tags": [tag.strip() for tag in args.tags.split(",") if tag.strip()],
         "best_for": args.best_for,
         "chroma_key": bool(args.chroma_key),
+        "play_mode": normalize_play_mode(getattr(args, "play_mode", "forward")),
+        "can_reverse": bool(getattr(args, "can_reverse", False)),
+        "weight": clamp_float(getattr(args, "weight", 1.0), 1.0, 0.0, 1000.0),
+        "min_cycles": min_cycles,
+        "max_cycles": max_cycles,
+        "switch_at_boundary": bool(getattr(args, "switch_at_boundary", True)),
+        "enabled": bool(getattr(args, "enabled", True)),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     metadata_path.write_text(
@@ -388,6 +460,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0, help="Limit frames for quick tests; 0 means no limit.")
     parser.add_argument("--tags", default="speaking,teaching")
     parser.add_argument("--best-for", default="")
+    parser.add_argument("--play-mode", default="forward", choices=sorted(PLAY_MODES))
+    parser.add_argument("--can-reverse", action="store_true")
+    parser.add_argument("--weight", type=float, default=1.0)
+    parser.add_argument("--min-cycles", type=int, default=1)
+    parser.add_argument("--max-cycles", type=int, default=1)
+    parser.add_argument("--switch-at-boundary", dest="switch_at_boundary", action="store_true", default=True)
+    parser.add_argument("--no-switch-at-boundary", dest="switch_at_boundary", action="store_false")
+    parser.add_argument("--enabled", dest="enabled", action="store_true", default=True)
+    parser.add_argument("--disabled", dest="enabled", action="store_false")
     parser.add_argument("--chroma-key", action="store_true")
     parser.add_argument("--use-ffmpeg-cut", action="store_true")
     parser.add_argument("--ffmpeg-path", default=DEFAULT_FFMPEG)

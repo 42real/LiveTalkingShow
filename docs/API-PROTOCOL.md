@@ -52,10 +52,10 @@ LiveTalking JSON 响应：
 | `POST` | `/motion/plan` | JSON | 根据文本生成动作编排计划。 |
 | `POST` | `/motion/source/upload` | multipart | 上传动作素材源视频。 |
 | `POST` | `/motion/source/probe` | JSON | 读取源视频时长、帧率和预览地址。 |
-| `POST` | `/motion/source/detect` | JSON | 检测源视频首帧人脸框和生成框。 |
+| `POST` | `/motion/source/detect` | JSON | 检测源视频或图片目录首帧人脸框和生成框。 |
 | `GET` | `/motion/source/video` | file | 预览允许目录内的源视频。 |
 | `POST` | `/motion/select` | JSON | 选择当前 session 使用的动作素材。 |
-| `POST` | `/motion/clips/create` | JSON | 从源视频生成动作素材。 |
+| `POST` | `/motion/clips/create` | JSON | 从源视频或图片目录生成动作素材。 |
 | `POST` | `/motion/clips/update` | JSON | 修改动作素材元信息。 |
 | `POST` | `/motion/clips/delete` | JSON | 删除动作素材。 |
 | `GET` | `/api/admin/config` | JSON | 查看启动配置（返回 `vars(opt)` 全量配置字典）。 |
@@ -483,7 +483,7 @@ query：
 | `avatar_id` | 启动配置 | 没有 session 时用于从磁盘列出指定 avatar 的素材。 |
 | `reload` | `0` | `1` 表示让当前 session 重新从磁盘读取素材。 |
 
-返回中的每个素材会包含 `action_id`、`display_name`、`fps`、`frame_count`、`img_size`、`pads`、`tags`、`best_for`、`current` 等字段。
+返回中的每个素材会包含 `action_id`、`display_name`、`kind`、`fps`、`frame_count`、`img_size`、`pads`、`tags`、`best_for`、`play_mode`、`can_reverse`、`weight`、`min_cycles`、`max_cycles`、`switch_at_boundary`、`enabled`、`current`、`selected`、`pool_selected` 等字段。
 
 上传源视频：
 
@@ -552,7 +552,7 @@ Content-Type: application/json
 }
 ```
 
-返回会包含 `base_box`、`padded_box`、`width`、`height`、`preview`。前端用它画“检测框”和“生成框”。
+`source` 可以是允许目录内的视频文件或图片目录。返回会包含 `base_box`、`padded_box`、`width`、`height`、`image`。`image` 是预览图的 data URL，前端用它画“检测框”和“生成框”。
 
 生成动作素材：
 
@@ -578,6 +578,13 @@ Content-Type: application/json
   "max_frames": 0,
   "tags": "speaking,teaching",
   "best_for": "讲解知识点",
+  "play_mode": "forward",
+  "can_reverse": false,
+  "weight": 3,
+  "min_cycles": 1,
+  "max_cycles": 1,
+  "switch_at_boundary": true,
+  "enabled": true,
   "chroma_key": true,
   "use_ffmpeg_cut": true,
   "ffmpeg_path": "ffmpeg"
@@ -587,7 +594,11 @@ Content-Type: application/json
 说明：
 
 - `kind=speaking` 会写入 `data/speaking_actions`，`kind=idle` 会写入 `data/idle_actions`。
+- `source` 可以是允许目录内的视频文件，也可以是允许目录内的图片目录。图片目录中的帧必须同尺寸、同通道；`/motion/source/probe` 和 `/motion/source/video` 只支持视频文件。
 - `max_frames=0` 表示不限制帧数。交互测试建议使用短素材，避免启动时一次性加载太多帧。
+- `play_mode` 支持 `forward`、`pingpong`、`reverse`、`random_direction`。`reverse` 和 `random_direction` 需要配合 `can_reverse=true` 才会倒放。
+- `weight` 是自动素材池权重，范围 `0-1000`。`min_cycles` 和 `max_cycles` 范围 `1-100`。
+- `switch_at_boundary=true` 表示音频目标状态变化时，动作素材等当前原子动作播放到边界再切换；嘴型推理仍会随音频立即生效。`enabled=false` 表示该素材不加入 `auto` 自动素材池。
 - 如果请求里带了有效 `sessionid`，生成后会让该 session 重新加载对应素材。
 - 同名素材默认不覆盖，除非传入 `overwrite=true`。
 
@@ -606,6 +617,14 @@ Content-Type: application/json
 }
 ```
 
+`action_id` 支持：
+
+| 取值 | 效果 |
+| --- | --- |
+| `lecture_explain` | 固定使用指定动作素材。 |
+| `auto` / `pool` / `all` / `*` | 使用自动素材池。 |
+| 空字符串 / `default` / `none` / `null` | 清空选择，回到默认素材。 |
+
 修改素材元信息：
 
 ```http
@@ -622,9 +641,18 @@ Content-Type: application/json
   "next_action_id": "lecture_explain_01",
   "display_name": "普通讲解",
   "best_for": "讲解知识点",
-  "tags": "speaking,teaching"
+  "tags": "speaking,teaching",
+  "play_mode": "forward",
+  "can_reverse": false,
+  "weight": 3,
+  "min_cycles": 1,
+  "max_cycles": 1,
+  "switch_at_boundary": true,
+  "enabled": true
 }
 ```
+
+该接口只修改素材目录名和 `metadata.json`，不会重新生成帧。运行中的 session 会重新加载对应状态的素材。
 
 删除素材：
 
@@ -678,9 +706,14 @@ Content-Type: application/json
   "avatar": "optional_avatar",
   "refaudio": "",
   "reftext": "",
-  "custom_config": ""
+  "custom_config": "",
+  "max_width": 0,
+  "max_height": 720,
+  "fps": 15
 }
 ```
+
+`max_width`、`max_height`、`fps` 只对 packed alpha WebRTC 生效，用来降低远程透明显示的编码和网络压力。`0` 或不传表示不限制。
 
 返回：
 
@@ -723,6 +756,8 @@ packed 视频一帧分左右两半：
 left  = color
 right = alpha mask
 ```
+
+例如原始 avatar 是 `1080x1920`，不限制时 packed 视频轨是 `2160x1920`；传 `max_height=720` 后，逻辑透明画面约为 `405x720`，packed 视频轨约为 `810x720`。
 
 双轨 alpha WebRTC：
 

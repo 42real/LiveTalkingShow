@@ -51,10 +51,11 @@ class PlayerStreamTrack(MediaStreamTrack):
     A video track that returns an animated flag.
     """
 
-    def __init__(self, player, kind):
+    def __init__(self, player, kind, video_ptime: float = VIDEO_PTIME):
         super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
+        self._video_ptime = video_ptime if video_ptime > 0 else VIDEO_PTIME
         queue_size = 2 if kind == "video" else 100
         self._queue = queue.Queue(maxsize=queue_size)
         self._dropped = 0
@@ -75,9 +76,9 @@ class PlayerStreamTrack(MediaStreamTrack):
         if self.kind == 'video':
             if hasattr(self, "_timestamp"):
                 #self._timestamp = (time.time()-self._start) * VIDEO_CLOCK_RATE
-                self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
+                self._timestamp += int(self._video_ptime * VIDEO_CLOCK_RATE)
                 self.current_frame_count += 1
-                wait = self._start + self.current_frame_count * VIDEO_PTIME - time.time()
+                wait = self._start + self.current_frame_count * self._video_ptime - time.time()
                 # wait = self.timelist[0] + len(self.timelist)*VIDEO_PTIME - time.time()               
                 if wait>0:
                     await asyncio.sleep(wait)

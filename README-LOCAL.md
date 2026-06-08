@@ -17,7 +17,7 @@ TTS 服务，默认 8036
 LiveTalking 主服务，默认 8050
   加载 avatar 和 wav2lip/musetalk/ultralight
   接收文字或外部音频
-  输出 /alpha/ws 视频和 /alpha/audio 音频
+  推荐输出 packed WebRTC 透明视频，也保留 /alpha/ws 调试视频
 
 显示/测试端，Web 默认 8070，overlay 为本机 Electron
   testclient/web 用来发文字、测接口、看视频
@@ -34,8 +34,9 @@ LiveTalking 主服务，默认 8050
 显示输出统一走：
 
 ```text
-WS /alpha/ws       视频，24 字节帧头 + raw RGBA/JPEG/PNG/WebP payload
-WS /alpha/audio    音频，16kHz mono PCM16
+POST /alpha/webrtc/packed_offer  推荐显示链路，WebRTC audio + packed video
+WS /alpha/ws                     调试链路，24 字节帧头 + raw RGBA/JPEG/PNG/WebP payload
+WS /alpha/audio                  调试链路音频，16kHz mono PCM16
 ```
 
 完整协议见 [docs/API-PROTOCOL.md](docs/API-PROTOCOL.md)。
@@ -132,8 +133,8 @@ Web 页可测试：
 - TTS `/health`、`/tts/voices`
 - `POST /alpha/speak`
 - `POST /tts/task/start -> WS /alpha/input/audio`
-- `WS /alpha/ws` 视频帧、尺寸、fps
-- `WS /alpha/audio` 音频播放
+- `WS /alpha/ws` 调试视频帧、尺寸、fps
+- `WS /alpha/audio` 调试音频播放
 
 ### 2.5 启动桌面 overlay
 
@@ -164,26 +165,31 @@ overlay 只负责显示，不负责文字输入，不直接连接 TTS。
 
 常用变量：
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `HF_ENDPOINT` | `https://hf-mirror.com` | Hugging Face 下载镜像。 |
-| `LIVETALKING_HOST` | `0.0.0.0` | 主服务监听地址。 |
-| `LIVETALKING_PORT` | `8050` | 主服务 HTTP/WebSocket 端口。 |
-| `LIVETALKING_MODEL` | `wav2lip` | `wav2lip` / `musetalk` / `ultralight`。 |
-| `AVATAR_ID` | `wav2lip_avatar_female_model` | `data/avatars/<avatar_id>` 目录名。 |
-| `LIVETALKING_BATCH_SIZE` | `4` | 低延迟建议 `2-4`；显存不足继续降。 |
-| `LIVETALKING_FPS` | `25` | 内部节奏按 25fps 设计，通常不改。 |
-| `LIVETALKING_TTS` | `robottts` | 交接方案统一用 `robottts`。 |
-| `TTS_SERVER_URL` | `http://127.0.0.1:8036` | robottts 兼容 TTS 服务地址。 |
-| `ROBOTTTS_MODE` | `instruct2` | 透传给 TTS。 |
-| `LIVETALKING_TRANSPORT` | `webrtc` | `webrtc` / `rtmp` / `rtcpush` / `virtualcam`。 |
-| `LIVETALKING_ALPHA_OUTPUT` | `1` | 开启 `/alpha/ws`、`/alpha/audio`、`/alpha/input/audio`。 |
+| 变量 | 默认 | 取值/范围 | 说明 |
+| --- | --- | --- | --- |
+| `LIVETALKING_CONFIG_PATH` | `config.yaml` | 相对路径或绝对路径 | 主配置文件路径；相对路径按仓库根目录解析。 |
+| `HF_ENDPOINT` | `https://hf-mirror.com` | `http/https` URL | Hugging Face 下载端点；直连稳定时可改官方端点。 |
+| `LIVETALKING_HOST` | `0.0.0.0` | IP/hostname | 主服务监听地址；`0.0.0.0` 允许远程访问，`127.0.0.1` 仅本机。 |
+| `LIVETALKING_PORT` | `8050` | `1-65535` | 主服务 HTTP/WebSocket 端口。 |
+| `LIVETALKING_MAX_SESSION` | `1` | `>=1` | 最大并发 session 数；alpha 桌面显示通常只需要 1。 |
+| `LIVETALKING_MODEL` | `wav2lip` | `wav2lip` / `musetalk` / `ultralight` | 数字人后端模型。 |
+| `AVATAR_ID` | `wav2lip_avatar_female_model` | `data/avatars/` 下目录名 | 当前加载的 avatar。 |
+| `LIVETALKING_BATCH_SIZE` | `4` | `>=1`，常用 `1-16` | 推理 batch；小一些延迟低，大一些可能吞吐高但更占显存。 |
+| `LIVETALKING_FPS` | `25` | `>0`，建议 `25` | 内部视频节奏；素材通常按 25fps 制作。 |
+| `LIVETALKING_TRANSPORT` | `webrtc` | `webrtc` / `rtmp` / `rtcpush` / `virtualcam` | 基础输出方式；本地 alpha/Web/overlay 显示建议保持 `webrtc`。 |
+| `LIVETALKING_ALPHA_OUTPUT` | `1` | bool：`1/0`、`true/false` | 开启 `/alpha/input/audio`、`/alpha/webrtc/packed_offer`、`/alpha/ws`、`/alpha/audio`。 |
+| `LIVETALKING_TTS` | `robottts` | 常用 `robottts` | TTS 插件；交接主链路统一用 robottts 兼容接口。 |
+| `TTS_SERVER_URL` | `http://127.0.0.1:8036` | `http/https` URL | robottts 兼容 TTS 服务地址。 |
+| `ROBOTTTS_MODE` | `instruct2` | 由 TTS 服务解释 | robottts 模式，透传给 TTS。 |
+| `LIVETALKING_MOTION_STRATEGY` | `weighted_no_repeat` | `sequence` / `random` / `weighted_random` / `no_repeat_random` / `weighted_no_repeat` | 同一状态下多个动作素材的选择策略。 |
+| `MOTION_LLM_BASE_URL` | 空 | `http/https` URL 或空 | `/motion/plan` 使用的可选 LLM 地址。 |
+| `MOTION_LLM_MODEL` | 空 | string 或空 | `/motion/plan` 使用的可选 LLM 模型名。 |
 
 端口联动：
 
 | 改动 | 同步修改 |
 | --- | --- |
-| LiveTalking 端口 | `LIVETALKING_URL`、`LIVETALKING_WS_URL`、`LIVETALKING_SERVER`、`VITE_LIVETALKING_URL`、`VITE_ALPHA_INPUT_WS`。 |
+| LiveTalking 端口 | `LIVETALKING_SERVER`、`VITE_LIVETALKING_URL`、`VITE_ALPHA_INPUT_WS`。 |
 | TTS 端口 | `TTS_SERVER_URL`、`VITE_TTS_SERVER_URL`。 |
 | 远程访问 | 客户端地址改成服务机器 IP 或端口转发后的地址。 |
 
@@ -237,6 +243,20 @@ alpha 视频：
 ws://127.0.0.1:8050/alpha/ws?max_height=720&fps=25&format=jpeg&quality=80
 ws://127.0.0.1:8050/alpha/ws?max_height=1080&fps=15&format=raw
 ```
+
+动作素材：
+
+```bash
+curl -X POST http://127.0.0.1:8050/motion/select \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "sessionid": "当前 session id",
+    "kind": "speaking",
+    "action_id": "auto"
+  }'
+```
+
+Wav2Lip 支持给 `speaking` 和 `idle` 两个状态分别制作多个动作素材，并用 `auto` 自动素材池轮换播放。制作流程、素材要求、批量 manifest 和参数范围见 [docs/SPEAKING-MOTION-CLIPS.md](docs/SPEAKING-MOTION-CLIPS.md)。
 
 ## 5. avatar 制作和导入
 
@@ -376,16 +396,19 @@ cp .env.example .env
 
 常用变量：
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `TEST_TTS_PROVIDER` | `edge` | `edge` / `bailian`。 |
-| `TTS_SERVICE_PORT` | `8036` | 测试 TTS 端口。 |
-| `TEST_CLIENT_PORT` | `8070` | Web 测试页端口。 |
-| `LIVETALKING_SERVER` | `http://127.0.0.1:8050` | overlay 连接的 LiveTalking 地址。 |
-| `LIVETALKING_VIDEO_FORMAT` | `raw` | overlay 视频编码，透明显示推荐 `raw`。 |
-| `LIVETALKING_VIDEO_MAX_HEIGHT` | `1080` | overlay 拉流最大高度。 |
-| `LIVETALKING_VIDEO_FPS` | `15` | overlay 拉流帧率。 |
-| `LIVETALKING_PLAY_AUDIO` | `0` | overlay 是否播放 `/alpha/audio`。 |
+| 变量 | 默认 | 取值/范围 | 说明 |
+| --- | --- | --- | --- |
+| `TEST_TTS_PROVIDER` | `edge` | `edge` / `bailian` | 测试 TTS provider。 |
+| `TTS_SERVICE_PORT` | `8036` | `1-65535` | 测试 TTS 端口。 |
+| `TEST_CLIENT_PORT` | `8070` | `1-65535` | Web 测试页端口。 |
+| `VITE_LIVETALKING_URL` | `http://127.0.0.1:8050` | `http/https` URL | Web 浏览器访问 LiveTalking 的地址。 |
+| `VITE_ALPHA_INPUT_WS` | `ws://127.0.0.1:8050/alpha/input/audio` | `ws/wss` URL | TTS task 推音频目标。 |
+| `VITE_ALPHA_OUTPUT` | `webrtc-packed` | `webrtc-packed` / `ws` | Web 视频输出链路；正常使用保持默认。 |
+| `LIVETALKING_SERVER` | `http://127.0.0.1:8050` | `http/https` URL | overlay 连接的 LiveTalking 地址。 |
+| `LIVETALKING_OUTPUT` | `webrtc-packed` | `webrtc-packed` / `ws` | overlay 视频输出链路；正常使用保持默认。 |
+| `LIVETALKING_PLAY_AUDIO` | `0` | bool：`0/1` | overlay 是否播放 WebRTC 音频轨。 |
+
+Web/overlay 的帧率、最大高度、编码格式、渲染器等属于高级排障参数，默认值由代码提供，需要时见 [testclient/README.md](testclient/README.md) 临时覆盖。
 
 ## 7. 排错
 
@@ -409,7 +432,7 @@ curl -X POST http://127.0.0.1:8050/alpha/session \
 | 问题 | 处理 |
 | --- | --- |
 | Web/overlay 连不上 | 检查端口、IP、VS Code/SSH 端口转发和 `.env` 地址。 |
-| overlay 没画面 | 确认 `LIVETALKING_ALPHA_OUTPUT=1`，并连接正确的 `/alpha/ws`。 |
+| overlay 没画面 | 确认 `LIVETALKING_ALPHA_OUTPUT=1`，默认应连接 `/alpha/webrtc/packed_offer`。 |
 | 画面尺寸不对 | 检查 `data/avatars/<avatar_id>/full_imgs` 原图宽高；显示缩放不裁剪原图。 |
 | 声音重复 | 保持 `LIVETALKING_PLAY_AUDIO=0`，只让一个组件播放声音。 |
 | 推理卡顿 | 降低 `LIVETALKING_BATCH_SIZE`，降低 overlay/web 拉流 `fps/max_height`。 |

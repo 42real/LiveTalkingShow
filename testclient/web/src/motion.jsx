@@ -24,7 +24,7 @@ const URL_PARAMS = new URLSearchParams(window.location.search);
 const DEFAULTS = {
   liveTalkingUrl: URL_PARAMS.get('live') || DEFAULT_LIVETALKING_URL,
   sessionId: URL_PARAMS.get('sessionid') || '',
-  avatarId: URL_PARAMS.get('avatar_id') || 'mute_teacher_motion_v1_pad01000',
+  avatarId: URL_PARAMS.get('avatar_id') || import.meta.env.VITE_AVATAR_ID || '',
   source: URL_PARAMS.get('source') || '',
   ffmpegPath: 'ffmpeg'
 };
@@ -35,6 +35,28 @@ const PAD_FIELDS = [
   { key: 'left', label: '左' },
   { key: 'right', label: '右' }
 ];
+const PLAY_MODE_OPTIONS = [
+  { value: 'forward', label: '正向播放' },
+  { value: 'pingpong', label: '正放后倒放' },
+  { value: 'reverse', label: '倒放' },
+  { value: 'random_direction', label: '随机方向' }
+];
+
+function playModeLabel(value) {
+  return PLAY_MODE_OPTIONS.find((option) => option.value === value)?.label || value || '正向播放';
+}
+
+function defaultPlaybackForKind(kind) {
+  return {
+    playMode: kind === 'idle' ? 'pingpong' : 'forward',
+    canReverse: false,
+    weight: '1',
+    minCycles: '1',
+    maxCycles: '1',
+    switchAtBoundary: true,
+    enabled: true
+  };
+}
 
 function defaultDraftForKind(kind) {
   if (kind === 'idle') {
@@ -42,14 +64,16 @@ function defaultDraftForKind(kind) {
       actionId: 'idle_stand',
       displayName: '静息站立',
       tags: 'idle,teaching',
-      bestFor: '等待学生回答、听讲、停顿'
+      bestFor: '等待学生回答、听讲、停顿',
+      ...defaultPlaybackForKind(kind)
     };
   }
   return {
     actionId: 'lecture_explain',
     displayName: '普通讲解',
     tags: 'speaking,teaching',
-    bestFor: '讲解知识点'
+    bestFor: '讲解知识点',
+    ...defaultPlaybackForKind(kind)
   };
 }
 
@@ -121,6 +145,18 @@ function tagsToText(value) {
   return String(value || '');
 }
 
+function clipPlaybackText(clip) {
+  const minCycles = Number.parseInt(clip?.min_cycles ?? 1, 10) || 1;
+  const maxCycles = Number.parseInt(clip?.max_cycles ?? minCycles, 10) || minCycles;
+  const cycleText = minCycles === maxCycles ? `${minCycles} 次` : `${minCycles}-${maxCycles} 次`;
+  const flags = [
+    clip?.enabled === false ? '不进池' : '进池',
+    clip?.switch_at_boundary === false ? '立即切素材' : '边界切素材',
+    clip?.can_reverse ? '允许倒放' : ''
+  ].filter(Boolean);
+  return `${playModeLabel(clip?.play_mode)} / 权重 ${clip?.weight ?? 1} / 循环 ${cycleText} / ${flags.join(' / ')}`;
+}
+
 function buildVideoUrl(baseUrl, videoUrl) {
   if (!videoUrl) return '';
   if (/^https?:\/\//i.test(videoUrl)) return videoUrl;
@@ -186,7 +222,14 @@ function App() {
     displayName: '',
     description: '',
     bestFor: '',
-    tags: ''
+    tags: '',
+    playMode: 'forward',
+    canReverse: false,
+    weight: '1',
+    minCycles: '1',
+    maxCycles: '1',
+    switchAtBoundary: true,
+    enabled: true
   });
   const [settings, setSettings] = useState({
     clipKind: INITIAL_CLIP_KIND,
@@ -277,9 +320,16 @@ function App() {
       displayName: clip.display_name || actionId,
       description: clip.description || '',
       bestFor: clip.best_for || '',
-      tags: tagsToText(clip.tags)
+      tags: tagsToText(clip.tags),
+      playMode: clip.play_mode || (settings.clipKind === 'idle' ? 'pingpong' : 'forward'),
+      canReverse: !!clip.can_reverse,
+      weight: String(clip.weight ?? 1),
+      minCycles: String(clip.min_cycles ?? 1),
+      maxCycles: String(clip.max_cycles ?? clip.min_cycles ?? 1),
+      switchAtBoundary: clip.switch_at_boundary !== false,
+      enabled: clip.enabled !== false
     });
-  }, []);
+  }, [settings.clipKind]);
 
   const cancelEditClip = useCallback(() => {
     setEditingClip('');
@@ -289,7 +339,14 @@ function App() {
       displayName: '',
       description: '',
       bestFor: '',
-      tags: ''
+      tags: '',
+      playMode: 'forward',
+      canReverse: false,
+      weight: '1',
+      minCycles: '1',
+      maxCycles: '1',
+      switchAtBoundary: true,
+      enabled: true
     });
   }, []);
 
@@ -348,7 +405,14 @@ function App() {
           display_name: editForm.displayName.trim(),
           description: editForm.description.trim(),
           best_for: editForm.bestFor.trim(),
-          tags: editForm.tags
+          tags: editForm.tags,
+          play_mode: editForm.playMode,
+          can_reverse: editForm.canReverse,
+          weight: toNumber(editForm.weight, 1),
+          min_cycles: Number.parseInt(editForm.minCycles || '1', 10),
+          max_cycles: Number.parseInt(editForm.maxCycles || editForm.minCycles || '1', 10),
+          switch_at_boundary: editForm.switchAtBoundary,
+          enabled: editForm.enabled
         })
       });
       const payload = await resp.json();
@@ -606,7 +670,14 @@ function App() {
       start: Number(startMark.toFixed(2)),
       end: Number(endMark.toFixed(2)),
       tags: draft.tags,
-      bestFor: draft.bestFor
+      bestFor: draft.bestFor,
+      playMode: draft.playMode,
+      canReverse: draft.canReverse,
+      weight: draft.weight,
+      minCycles: draft.minCycles,
+      maxCycles: draft.maxCycles,
+      switchAtBoundary: draft.switchAtBoundary,
+      enabled: draft.enabled
     };
     setSegments((items) => [...items, segment]);
     usedIds.add(uniqueActionId);
@@ -678,6 +749,13 @@ function App() {
           face_det_batch_size: Number.parseInt(settings.faceBatchSize || '8', 10),
           tags: segment.tags || draft.tags,
           best_for: segment.bestFor || draft.bestFor,
+          play_mode: segment.playMode || draft.playMode,
+          can_reverse: segment.canReverse ?? draft.canReverse,
+          weight: toNumber(segment.weight ?? draft.weight, 1),
+          min_cycles: Number.parseInt(segment.minCycles || draft.minCycles || '1', 10),
+          max_cycles: Number.parseInt(segment.maxCycles || draft.maxCycles || draft.minCycles || '1', 10),
+          switch_at_boundary: segment.switchAtBoundary ?? draft.switchAtBoundary,
+          enabled: segment.enabled ?? draft.enabled,
           chroma_key: settings.chromaKey,
           use_ffmpeg_cut: settings.useFfmpegCut,
           ffmpeg_path: settings.ffmpegPath,
@@ -710,7 +788,14 @@ function App() {
       start: startMark,
       end: endMark,
       tags: draft.tags,
-      bestFor: draft.bestFor
+      bestFor: draft.bestFor,
+      playMode: draft.playMode,
+      canReverse: draft.canReverse,
+      weight: draft.weight,
+      minCycles: draft.minCycles,
+      maxCycles: draft.maxCycles,
+      switchAtBoundary: draft.switchAtBoundary,
+      enabled: draft.enabled
     });
   }, [draft, endMark, generateSegment, startMark]);
 
@@ -847,7 +932,8 @@ function App() {
                       actionId: current.actionId.startsWith('idle_') ? current.actionId : 'idle_stand',
                       displayName: current.displayName === '普通讲解' ? '静息站立' : current.displayName,
                       tags: 'idle,teaching',
-                      bestFor: current.bestFor === '讲解知识点' ? '等待学生回答、听讲、停顿' : current.bestFor
+                      bestFor: current.bestFor === '讲解知识点' ? '等待学生回答、听讲、停顿' : current.bestFor,
+                      playMode: 'pingpong'
                     }));
                   } else {
                     setDraft((current) => ({
@@ -855,7 +941,8 @@ function App() {
                       actionId: current.actionId.startsWith('idle_') ? 'lecture_explain' : current.actionId,
                       displayName: current.displayName === '静息站立' ? '普通讲解' : current.displayName,
                       tags: 'speaking,teaching',
-                      bestFor: current.bestFor === '等待学生回答、听讲、停顿' ? '讲解知识点' : current.bestFor
+                      bestFor: current.bestFor === '等待学生回答、听讲、停顿' ? '讲解知识点' : current.bestFor,
+                      playMode: 'forward'
                     }));
                   }
                 }}
@@ -889,6 +976,56 @@ function App() {
               <label>
                 适合场景
                 <input value={draft.bestFor} onChange={(event) => setDraftField('bestFor', event.target.value)} />
+              </label>
+            </div>
+            <div className="grid2">
+              <label>
+                播放模式
+                <select value={draft.playMode} onChange={(event) => setDraftField('playMode', event.target.value)}>
+                  {PLAY_MODE_OPTIONS.map((option) => (
+                    <option value={option.value} key={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                权重
+                <input type="number" min="0" step="0.1" value={draft.weight} onChange={(event) => setDraftField('weight', event.target.value)} />
+              </label>
+            </div>
+            <div className="grid2">
+              <label>
+                最少循环
+                <input type="number" min="1" step="1" value={draft.minCycles} onChange={(event) => setDraftField('minCycles', event.target.value)} />
+              </label>
+              <label>
+                最多循环
+                <input type="number" min="1" step="1" value={draft.maxCycles} onChange={(event) => setDraftField('maxCycles', event.target.value)} />
+              </label>
+            </div>
+            <div className="motionChecks">
+              <label className="checkboxLine">
+                <input
+                  type="checkbox"
+                  checked={draft.canReverse}
+                  onChange={(event) => setDraftField('canReverse', event.target.checked)}
+                />
+                <span>允许倒放</span>
+              </label>
+              <label className="checkboxLine">
+                <input
+                  type="checkbox"
+                  checked={draft.switchAtBoundary}
+                  onChange={(event) => setDraftField('switchAtBoundary', event.target.checked)}
+                />
+                <span>仅在动作边界切换素材</span>
+              </label>
+              <label className="checkboxLine">
+                <input
+                  type="checkbox"
+                  checked={draft.enabled}
+                  onChange={(event) => setDraftField('enabled', event.target.checked)}
+                />
+                <span>加入自动素材池</span>
               </label>
             </div>
             <div className="buttons">
@@ -1076,6 +1213,7 @@ function App() {
                     </div>
                   </div>
                   <span>{clip.frame_count || 0} 帧 / {clip.fps || '-'} fps</span>
+                  <span className="clipMetaRow">{clipPlaybackText(clip)}</span>
                   {clip.description && <span>{clip.description}</span>}
                   {clip.best_for && <span>适合：{clip.best_for}</span>}
                   {Array.isArray(clip.tags) && clip.tags.length > 0 && <span>标签：{clip.tags.join(', ')}</span>}
@@ -1104,6 +1242,56 @@ function App() {
                         <label>
                           标签
                           <input value={editForm.tags} onChange={(event) => setEditField('tags', event.target.value)} />
+                        </label>
+                      </div>
+                      <div className="grid2">
+                        <label>
+                          播放模式
+                          <select value={editForm.playMode} onChange={(event) => setEditField('playMode', event.target.value)}>
+                            {PLAY_MODE_OPTIONS.map((option) => (
+                              <option value={option.value} key={option.value}>{option.label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          权重
+                          <input type="number" min="0" step="0.1" value={editForm.weight} onChange={(event) => setEditField('weight', event.target.value)} />
+                        </label>
+                      </div>
+                      <div className="grid2">
+                        <label>
+                          最少循环
+                          <input type="number" min="1" step="1" value={editForm.minCycles} onChange={(event) => setEditField('minCycles', event.target.value)} />
+                        </label>
+                        <label>
+                          最多循环
+                          <input type="number" min="1" step="1" value={editForm.maxCycles} onChange={(event) => setEditField('maxCycles', event.target.value)} />
+                        </label>
+                      </div>
+                      <div className="motionChecks">
+                        <label className="checkboxLine">
+                          <input
+                            type="checkbox"
+                            checked={editForm.canReverse}
+                            onChange={(event) => setEditField('canReverse', event.target.checked)}
+                          />
+                          <span>允许倒放</span>
+                        </label>
+                        <label className="checkboxLine">
+                          <input
+                            type="checkbox"
+                            checked={editForm.switchAtBoundary}
+                            onChange={(event) => setEditField('switchAtBoundary', event.target.checked)}
+                          />
+                          <span>仅在动作边界切换素材</span>
+                        </label>
+                        <label className="checkboxLine">
+                          <input
+                            type="checkbox"
+                            checked={editForm.enabled}
+                            onChange={(event) => setEditField('enabled', event.target.checked)}
+                          />
+                          <span>加入自动素材池</span>
                         </label>
                       </div>
                       <div className="buttons">

@@ -2,7 +2,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-if [ -f .env ]; then
+if [ -f ../load-env-defaults.sh ]; then
+  . ../load-env-defaults.sh
+  load_env_defaults .env
+elif [ -f .env ]; then
   set -a
   . ./.env
   set +a
@@ -13,6 +16,7 @@ export LIVETALKING_CLICK_THROUGH="${LIVETALKING_CLICK_THROUGH:-1}"
 export LIVETALKING_PLAY_AUDIO="${LIVETALKING_PLAY_AUDIO:-0}"
 export LIVETALKING_AUTO_SESSION="${LIVETALKING_AUTO_SESSION:-1}"
 export LIVETALKING_CLOSE_SESSION_ON_EXIT="${LIVETALKING_CLOSE_SESSION_ON_EXIT:-0}"
+export LIVETALKING_OUTPUT="${LIVETALKING_OUTPUT:-webrtc-packed}"
 if [ -n "${LIVETALKING_EXTRA_PATH:-}" ]; then
   export PATH="${LIVETALKING_EXTRA_PATH}:${PATH:-}"
 fi

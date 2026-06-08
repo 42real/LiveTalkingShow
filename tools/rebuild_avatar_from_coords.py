@@ -13,9 +13,12 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 def list_images(directory: Path) -> list[Path]:
+    def sort_key(path: Path):
+        return int(path.stem) if path.stem.isdigit() else path.name
+
     return sorted(
         (path for path in directory.iterdir() if path.suffix.lower() in IMAGE_EXTS),
-        key=lambda path: int(path.stem),
+        key=sort_key,
     )
 
 

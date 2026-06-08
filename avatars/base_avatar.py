@@ -302,13 +302,35 @@ class BaseAvatar:
             self.custom_index[audiotype] = 0
 
     # ========================== 核心渲染及 Pipeline 桥接 ==========================
-    def get_avatar_length(self, speaking: bool | None = None):
+    def get_render_context(self, speaking: bool | None = None):
+        return None
+
+    def get_avatar_length(self, speaking: bool | None = None, render_context=None):
         if hasattr(self, 'frame_list_cycle'):
             return len(self.frame_list_cycle)
         return 1
 
-    def get_silent_frame(self, idx: int, audiotype: int | None = None):
+    def get_silent_frame(self, idx: int, audiotype: int | None = None, render_context=None):
         return self.frame_list_cycle[idx]
+
+    def prepare_render_batch(self, speaking: bool, batch_size: int, start_index: int):
+        render_context = self.get_render_context(speaking=speaking)
+        length = self.get_avatar_length(speaking=speaking, render_context=render_context)
+        frame_items = []
+        for i in range(batch_size):
+            frame_items.append({
+                "idx": mirror_index(length, start_index + i),
+                "render_context": render_context,
+            })
+        return frame_items, start_index + batch_size
+
+    def get_batch_render_context(self, frame_items: list[dict]):
+        if not frame_items:
+            return None
+        first_context = frame_items[0].get("render_context")
+        if all(item.get("render_context") is first_context for item in frame_items):
+            return first_context
+        return {"frame_items": frame_items}
         
     def inference(self, quit_event):
         index = 0
@@ -336,22 +358,36 @@ class BaseAvatar:
                     is_all_silence = False               
                 audio_frames.append(audioframe)
 
-             # 检测状态变化
+             # 检测音频状态变化；嘴型推理跟随音频立即生效，动作素材由具体 avatar 决定是否等边界切换。
             current_speaking = not is_all_silence
 
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
-                length = self.get_avatar_length(speaking=False)
+                frame_items, index = self.prepare_render_batch(
+                    speaking=False,
+                    batch_size=self.batch_size,
+                    start_index=index,
+                )
                 for i in range(self.batch_size):
-                    idx = mirror_index(length, index)
-                    self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx))
-                    index = index + 1
+                    item = frame_items[i] if i < len(frame_items) else {}
+                    self.res_frame_queue.put((
+                        None,
+                        audio_frames[i*2:i*2+2],
+                        item.get("idx", 0),
+                        item.get("render_context"),
+                    ))
             else:
                 if current_speaking and not last_speaking and self.custom_index.get(1) is not None: #从静音到说话切换,并且有自定义静态视频
                     index = 0
                 t = time.perf_counter()
 
-                length = self.get_avatar_length(speaking=True)
-                pred = self.inference_batch(index, audiofeat_batch)
+                batch_start_index = index
+                frame_items, index = self.prepare_render_batch(
+                    speaking=True,
+                    batch_size=self.batch_size,
+                    start_index=index,
+                )
+                batch_render_context = self.get_batch_render_context(frame_items)
+                pred = self.inference_batch(batch_start_index, audiofeat_batch, render_context=batch_render_context)
 
                 counttime += (time.perf_counter() - t)
                 count += self.batch_size
@@ -360,11 +396,16 @@ class BaseAvatar:
                     count = 0
                     counttime = 0
                 for i, res_frame in enumerate(pred):
-                    self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], mirror_index(length, index)))
-                    index = index + 1
+                    item = frame_items[i] if i < len(frame_items) else {}
+                    self.res_frame_queue.put((
+                        res_frame,
+                        audio_frames[i*2:i*2+2],
+                        item.get("idx", 0),
+                        item.get("render_context"),
+                    ))
                     
             if current_speaking != last_speaking:
-                logger.info(f"inference 状态切换：{'说话' if last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
+                logger.info(f"inference 音频状态切换：{'说话' if last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
                 last_speaking = current_speaking         
         logger.info('baseavatar inference thread stop')
 
@@ -383,14 +424,19 @@ class BaseAvatar:
         while not quit_event.is_set():
             try:
                 audio_frames: list[AudioFrameData]
-                res_frame,audio_frames,idx = self.res_frame_queue.get(block=True, timeout=1)
+                frame_item = self.res_frame_queue.get(block=True, timeout=1)
+                if len(frame_item) == 3:
+                    res_frame,audio_frames,idx = frame_item
+                    render_context = None
+                else:
+                    res_frame,audio_frames,idx,render_context = frame_item
             except queue.Empty:
                 continue
             
-            # 检测状态变化
+            # 检测输出音频状态变化，用于播放链路状态和可选过渡。
             current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
             if current_speaking != _last_speaking:
-                logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
+                logger.info(f"输出音频状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
                 _transition_start = time.time()
             _last_speaking = current_speaking
 
@@ -402,7 +448,7 @@ class BaseAvatar:
                     target_frame = self.custom_img_cycle[audiotype][mirindex]
                     self.custom_index[audiotype] += 1
                 else:
-                    target_frame = self.get_silent_frame(idx, audiotype)
+                    target_frame = self.get_silent_frame(idx, audiotype, render_context=render_context)
                 
                 if enable_transition:
                     # 说话→静音过渡
@@ -419,7 +465,7 @@ class BaseAvatar:
                 self.speaking = True
                 try:
                     paste_start = time.perf_counter()
-                    current_frame = self.paste_back_frame(res_frame,idx)
+                    current_frame = self.paste_back_frame(res_frame,idx, render_context=render_context)
                     paste_ms = (time.perf_counter() - paste_start) * 1000
                     self._process_metrics_paste_ms += paste_ms
                     self._process_metrics_max_paste_ms = max(self._process_metrics_max_paste_ms, paste_ms)
