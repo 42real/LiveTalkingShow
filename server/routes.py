@@ -503,6 +503,9 @@ def _list_motion_clip_metadata(avatar_id: str, out_root: str = "", kind: str = "
     if not root.is_dir():
         return []
 
+    motion_config = _read_avatar_motion_config(avatar_id) if not out_root else {}
+    clip_overrides = _avatar_motion_clip_overrides(avatar_id, kind, motion_config) if not out_root else {}
+    default_play_mode = _avatar_motion_default_play_mode(motion_config, kind)
     clips = []
     for action_dir in sorted([path for path in root.iterdir() if path.is_dir()], key=lambda path: path.name):
         metadata_path = action_dir / "metadata.json"
@@ -516,7 +519,8 @@ def _list_motion_clip_metadata(avatar_id: str, out_root: str = "", kind: str = "
         metadata.setdefault("display_name", action_dir.name)
         metadata.setdefault("avatar_id", avatar_id)
         metadata.setdefault("kind", kind)
-        metadata["play_mode"] = _motion_play_mode(metadata.get("play_mode"), "pingpong" if kind == "idle" else "forward")
+        _apply_avatar_motion_clip_override(metadata, clip_overrides.get(action_dir.name))
+        metadata["play_mode"] = _motion_play_mode(metadata.get("play_mode"), default_play_mode)
         metadata["can_reverse"] = _bool_param(metadata.get("can_reverse"), False)
         metadata["weight"] = _float_param(metadata.get("weight"), 1.0, 0.0, 1000.0)
         metadata["min_cycles"] = _int_param(metadata.get("min_cycles"), 1, 1, 100)
@@ -542,6 +546,61 @@ def _read_avatar_motion_config(avatar_id: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _avatar_motion_default_play_mode(config: dict, kind: str) -> str:
+    if not isinstance(config, dict) or not config:
+        return "pingpong" if kind == "idle" else "forward"
+    states = config.get("states") if isinstance(config.get("states"), dict) else {}
+    state = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    return _motion_play_mode(state.get("default_play_mode"), "forward")
+
+
+def _request_motion_default_play_mode(avatar_id: str, kind: str, out_root: str = "", create: bool = False) -> str:
+    if str(out_root or "").strip():
+        return "pingpong" if kind == "idle" else "forward"
+    config = _read_avatar_motion_config(avatar_id)
+    if config:
+        return _avatar_motion_default_play_mode(config, kind)
+    if create:
+        return "forward"
+    return "pingpong" if kind == "idle" else "forward"
+
+
+def _avatar_motion_clip_overrides(avatar_id: str, kind: str, config: dict | None = None) -> dict:
+    config = config if isinstance(config, dict) else _read_avatar_motion_config(avatar_id)
+    states = config.get("states") if isinstance(config.get("states"), dict) else {}
+    state = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    clips = state.get("clips") if isinstance(state.get("clips"), list) else []
+    overrides = {}
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        action_id = str(clip.get("action_id", "")).strip()
+        if action_id:
+            overrides[action_id] = clip
+    return overrides
+
+
+def _apply_avatar_motion_clip_override(metadata: dict, override: dict | None) -> dict:
+    if not isinstance(override, dict):
+        return metadata
+    for key in (
+        "display_name",
+        "description",
+        "best_for",
+        "tags",
+        "play_mode",
+        "can_reverse",
+        "weight",
+        "min_cycles",
+        "max_cycles",
+        "switch_at_boundary",
+        "enabled",
+    ):
+        if key in override:
+            metadata[key] = override[key]
+    return metadata
+
+
 def _write_avatar_motion_config(avatar_id: str, config: dict) -> None:
     config_path = _avatar_motion_config_path(avatar_id)
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -560,7 +619,7 @@ def _ensure_avatar_motion_config(avatar_id: str) -> dict:
                     "path": "motions/idle",
                     "selection": "auto",
                     "strategy": os.getenv("LIVETALKING_IDLE_MOTION_STRATEGY", "weighted_no_repeat"),
-                    "default_play_mode": "pingpong",
+                    "default_play_mode": "forward",
                 },
                 "speaking": {
                     "path": "motions/speaking",
@@ -579,7 +638,7 @@ def _ensure_avatar_motion_config(avatar_id: str) -> dict:
             "LIVETALKING_IDLE_MOTION_STRATEGY" if kind == "idle" else "LIVETALKING_SPEAKING_MOTION_STRATEGY",
             os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"),
         ))
-        state.setdefault("default_play_mode", "pingpong" if kind == "idle" else "forward")
+        state.setdefault("default_play_mode", "forward")
     config.setdefault("version", 1)
     config.setdefault("layout", "avatar-local-motion")
     config.setdefault("strategy", os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"))
@@ -597,9 +656,15 @@ def _sync_avatar_motion_clip_config(avatar_id: str, kind: str, action_id: str, m
         clips.append({
             "action_id": action_id,
             "display_name": metadata.get("display_name", action_id),
+            "description": metadata.get("description", ""),
+            "best_for": metadata.get("best_for", ""),
             "enabled": _bool_param(metadata.get("enabled"), True),
             "weight": _float_param(metadata.get("weight"), 1.0, 0.0, 1000.0),
-            "play_mode": _motion_play_mode(metadata.get("play_mode"), "pingpong" if kind == "idle" else "forward"),
+            "play_mode": _motion_play_mode(metadata.get("play_mode"), "forward"),
+            "can_reverse": _bool_param(metadata.get("can_reverse"), False),
+            "min_cycles": _int_param(metadata.get("min_cycles"), 1, 1, 100),
+            "max_cycles": _int_param(metadata.get("max_cycles"), metadata.get("min_cycles", 1), 1, 100),
+            "switch_at_boundary": _bool_param(metadata.get("switch_at_boundary"), True),
             "tags": _motion_tags(metadata.get("tags", [])),
         })
     state["clips"] = sorted(clips, key=lambda clip: str(clip.get("action_id", "")))
@@ -1339,6 +1404,7 @@ async def motion_update_clip(request):
         source_dir = root / action_id
         if not source_dir.is_dir():
             return json_error(f"motion clip not found: {action_id}")
+        default_play_mode = _request_motion_default_play_mode(avatar_id, kind, explicit_out_root)
 
         target_dir = root / next_action_id
         if next_action_id != action_id:
@@ -1367,9 +1433,9 @@ async def motion_update_clip(request):
         if "tags" in params:
             metadata["tags"] = _motion_tags(params.get("tags"))
         if "play_mode" in params:
-            metadata["play_mode"] = _motion_play_mode(params.get("play_mode"), "pingpong" if kind == "idle" else "forward")
+            metadata["play_mode"] = _motion_play_mode(params.get("play_mode"), default_play_mode)
         else:
-            metadata.setdefault("play_mode", "pingpong" if kind == "idle" else "forward")
+            metadata.setdefault("play_mode", default_play_mode)
         if "can_reverse" in params:
             metadata["can_reverse"] = _bool_param(params.get("can_reverse"), False)
         else:
@@ -1504,6 +1570,7 @@ async def motion_create_clip(request):
 
         explicit_out_root = str(params.get("out_root", "")).strip()
         target_root = _motion_create_clip_root(avatar_id, kind, explicit_out_root)
+        default_play_mode = _request_motion_default_play_mode(avatar_id, kind, explicit_out_root, create=True)
         target_dir = target_root / action_id
         if target_dir.exists() and not (target_dir / "metadata.json").exists():
             logger.info("remove incomplete motion clip before rebuild: %s", target_dir)
@@ -1543,7 +1610,7 @@ async def motion_create_clip(request):
             max_frames=int(params.get("max_frames", 0) or 0),
             tags=str(params.get("tags", "idle,teaching" if kind == "idle" else "speaking,teaching")),
             best_for=str(params.get("best_for", "")),
-            play_mode=_motion_play_mode(params.get("play_mode"), "pingpong" if kind == "idle" else "forward"),
+            play_mode=_motion_play_mode(params.get("play_mode"), default_play_mode),
             can_reverse=_bool_param(params.get("can_reverse"), False),
             weight=_float_param(params.get("weight"), 1.0, 0.0, 1000.0),
             min_cycles=_int_param(params.get("min_cycles"), 1, 1, 100),

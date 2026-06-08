@@ -49,7 +49,7 @@ data/avatars/<avatar_id>/
       "path": "motions/idle",
       "selection": "auto",
       "strategy": "weighted_no_repeat",
-      "default_play_mode": "pingpong",
+      "default_play_mode": "forward",
       "clips": []
     },
     "speaking": {
@@ -72,7 +72,9 @@ data/avatars/<avatar_id>/
 | `states.<kind>.path` | 相对 avatar 目录的路径 | 该状态动作素材目录。 |
 | `states.<kind>.selection` | `auto`、具体 `action_id`、空字符串 | 默认选择。`auto` 表示自动素材池；空字符串表示回到 avatar 原始帧。 |
 | `states.<kind>.default_play_mode` | `forward` / `pingpong` / `reverse` / `random_direction` | 制作或补全素材 metadata 时的默认播放方式。 |
-| `states.<kind>.clips` | 列表 | 素材索引，工具会自动维护；运行时仍以每个素材目录里的 `metadata.json` 为准。 |
+| `states.<kind>.clips` | 列表 | 素材索引，工具会自动维护；同名素材在这里配置的播放字段会覆盖素材目录里的 `metadata.json`。 |
+
+`motion.json` 是 avatar 级统一配置。运行时先读取每个素材目录里的 `metadata.json`，再用 `motion.json` 中同名 `clips[].action_id` 的字段覆盖。常用覆盖字段包括 `display_name`、`enabled`、`weight`、`play_mode`、`can_reverse`、`min_cycles`、`max_cycles`、`switch_at_boundary`、`tags`、`best_for`。如果 `motion.json` 中没有某个字段，才使用素材自己的 `metadata.json`。
 
 ## 旧版兼容目录结构
 
@@ -188,8 +190,8 @@ uv run --python .venv/bin/python python tools/build_speaking_motion_clip.py \
 | `--max-frames` | `0` 或正整数 | `0` 表示不限制；调试时可限制帧数。 |
 | `--tags` | 逗号分隔 | 标签，例如 `speaking,teaching`。 |
 | `--best-for` | 文本 | 适合场景说明。 |
-| `--play-mode` | `forward`、`pingpong`、`reverse`、`random_direction` | 单个素材的播放方式。 |
-| `--can-reverse` | 开关 | 允许 `reverse` 或 `random_direction` 使用倒放。 |
+| `--play-mode` | `forward`、`pingpong`、`reverse`、`random_direction` | 单个素材的播放方向。`forward` 只正放；`pingpong` 正放后倒放；`reverse` 只倒放；`random_direction` 每次选中时随机正放或倒放。 |
+| `--can-reverse` | 开关 | 允许 `reverse` 或 `random_direction` 使用倒放；未开启时会回退为 `forward`。`pingpong` 本身会倒放，不受这个开关限制。 |
 | `--weight` | `0-1000` | 自动素材池权重，越大越容易被选中；全为 0 时按等权重处理。 |
 | `--min-cycles` / `--max-cycles` | `1-100` | 每次选中该素材后连续播放的循环次数。 |
 | `--switch-at-boundary` | 默认开启 | 音频目标状态变化时，等当前素材播放完再切换动作素材。 |
@@ -246,8 +248,8 @@ clips:
     display_name: 自然待机1
     start: 0
     end: 3
-    play_mode: pingpong
-    can_reverse: true
+    play_mode: forward
+    can_reverse: false
     weight: 3
     min_cycles: 1
     max_cycles: 2
@@ -321,6 +323,8 @@ curl -X POST "http://127.0.0.1:8050/motion/select" \
 | `no_repeat_random` | 等概率随机，尽量不连续重复上一个素材。 |
 | `weighted_no_repeat` | 默认值，按权重随机并尽量不连续重复。 |
 
+选择策略只决定“下一段播放哪个素材”，不决定“素材怎么播放”。素材正放、倒放、正放再倒放由 `play_mode` 控制。也就是说，`weighted_no_repeat` 配合 `play_mode=pingpong` 时，系统仍然会对每个被选中的素材正放再倒放；如果要禁用倒放，把对应素材的 `play_mode` 设为 `forward`。
+
 ## 音频和动作逻辑
 
 运行时有两个状态概念：
@@ -335,7 +339,7 @@ curl -X POST "http://127.0.0.1:8050/motion/select" \
 ```text
 motion scheduler pending motion=speaking audio_target=idle action=lecture_explain_01 cursor=42/75
 motion scheduler boundary switch speaking/lecture_explain_01 -> idle
-motion scheduler start motion=idle audio_target=idle action=idle_breath_01 mode=pool:weighted_no_repeat play_mode=pingpong cycles=1 frames=98
+motion scheduler start motion=idle audio_target=idle action=idle_breath_01 mode=pool:weighted_no_repeat play_mode=forward cycles=1 frames=98
 ```
 
 如果 `switch_at_boundary=false`，音频目标状态变化会立即打断当前动作并切换素材。这个适合非常短、无明显动作意图的素材，不适合挥手、指向、转身这类动作。
@@ -388,6 +392,12 @@ http://127.0.0.1:8070/
 - `motion scheduler pending`：音频目标状态已变化，但动作素材正在等待边界。
 - `motion scheduler boundary switch`：动作播放完并切换到新的动作素材状态。
 - `motion scheduler fallback`：没有选中素材或素材池为空，回到默认帧。
+- `output metrics`：统一输出链路的发送情况，重点看 `video_fps`、`max_video_ms`、`buffer`。
+- `packed alpha webrtc video`：packed alpha WebRTC 的编码前打包情况，重点看 `approx_fps`、`avg_pack_ms`、`dropped`。
+- `avatar process metrics`：avatar 推理/输出线程情况，重点看 `fps`、`avg_output_ms`、`max_output_ms`、`res_queue`。
+- `actual avg final fps`：普通 WebRTC track 消费侧统计。使用 packed alpha 输出时，优先参考 `packed alpha webrtc video` 和 `output metrics`。
+
+如果日志中 `output metrics video_fps` 和 `packed alpha webrtc approx_fps` 稳定在 25 左右，但肉眼感觉节奏突然变化，通常不是输出帧率变了，而是选中了不同长度或不同 `play_mode` 的原子动作。例如 `pingpong` 会把一段 120 帧素材变成约 239 帧播放序列，动作观感会比只正放更慢、更长。需要统一观感时，应统一素材原始 fps、动作时长、首尾姿态和 `play_mode`。
 
 画面不自然时优先检查：
 

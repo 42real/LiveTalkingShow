@@ -215,9 +215,53 @@ def _motion_selection_from_config(motion_config, kind):
         selection = motion_config.get(f"{kind}_selection")
     return selection
 
+def _motion_default_play_mode(motion_config, kind):
+    if not isinstance(motion_config, dict) or not motion_config:
+        return "pingpong" if kind == "idle" else "forward"
+    states = motion_config.get("states") if isinstance(motion_config.get("states"), dict) else {}
+    state_config = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    return _normalize_play_mode(state_config.get("default_play_mode"), "forward")
+
+def _motion_clip_overrides(motion_config, kind):
+    if not isinstance(motion_config, dict):
+        return {}
+    states = motion_config.get("states") if isinstance(motion_config.get("states"), dict) else {}
+    state_config = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    clips = state_config.get("clips") if isinstance(state_config.get("clips"), list) else []
+    overrides = {}
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        action_id = str(clip.get("action_id", "")).strip()
+        if action_id:
+            overrides[action_id] = clip
+    return overrides
+
+def _apply_motion_clip_config(metadata, override):
+    if not isinstance(override, dict):
+        return metadata
+    for key in (
+        "display_name",
+        "description",
+        "best_for",
+        "tags",
+        "play_mode",
+        "can_reverse",
+        "weight",
+        "min_cycles",
+        "max_cycles",
+        "switch_at_boundary",
+        "enabled",
+    ):
+        if key in override:
+            metadata[key] = override[key]
+    return metadata
+
 def load_motion_clips(avatar_id, kind="speaking", motion_config=None):
     roots = _motion_roots_for_kind(avatar_id, kind, motion_config)
     clips = {}
+    clip_overrides = _motion_clip_overrides(motion_config, kind)
+    default_play_mode = _motion_default_play_mode(motion_config, kind)
     for root in roots:
         if not os.path.isdir(root):
             continue
@@ -234,9 +278,10 @@ def load_motion_clips(avatar_id, kind="speaking", motion_config=None):
             metadata.setdefault("display_name", action_id)
             metadata.setdefault("kind", kind)
             metadata.setdefault("path", action_path)
+            metadata = _apply_motion_clip_config(metadata, clip_overrides.get(action_id))
             metadata["play_mode"] = _normalize_play_mode(
                 metadata.get("play_mode"),
-                "pingpong" if kind == "idle" else "forward",
+                default_play_mode,
             )
             metadata["can_reverse"] = _bool_metadata(metadata.get("can_reverse"), False)
             metadata["weight"] = _float_metadata(metadata.get("weight"), 1.0, 0.0, 1000.0)
@@ -543,14 +588,18 @@ class LipReal(BaseAvatar):
         })
         self._motion_player["last_action"][kind] = action_id
         logger.info(
-            "motion scheduler start motion=%s audio_target=%s action=%s mode=%s play_mode=%s cycles=%d frames=%d",
+            "motion scheduler start motion=%s audio_target=%s action=%s mode=%s "
+            "play_mode=%s cycles=%d source_frames=%d order_frames=%d total_frames=%d clip_fps=%.2f",
             kind,
             target_kind,
             action_id,
             mode,
             metadata.get("play_mode", "forward"),
             cycles,
+            len(clip["frames"]),
+            len(order),
             len(order) * cycles,
+            float(metadata.get("fps") or 0),
         )
 
     def _current_clip_complete(self):

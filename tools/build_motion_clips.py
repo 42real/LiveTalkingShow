@@ -80,7 +80,7 @@ def namespace_from_clip(manifest: dict, defaults: dict, clip: dict) -> SimpleNam
         max_frames=int(get_value(clip, defaults, "max_frames", 0) or 0),
         tags=str(get_value(clip, defaults, "tags", "idle,teaching" if kind == "idle" else "speaking,teaching")),
         best_for=str(get_value(clip, defaults, "best_for", "")),
-        play_mode=str(get_value(clip, defaults, "play_mode", "pingpong" if kind == "idle" else "forward")),
+        play_mode=str(get_value(clip, defaults, "play_mode", "forward")),
         can_reverse=as_bool(get_value(clip, defaults, "can_reverse", False)),
         weight=float(get_value(clip, defaults, "weight", 1.0) or 1.0),
         min_cycles=int(get_value(clip, defaults, "min_cycles", 1) or 1),

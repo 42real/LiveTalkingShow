@@ -392,7 +392,7 @@ def ensure_avatar_motion_config(avatar_id: str) -> dict:
         state.setdefault("path", f"motions/{kind}")
         state.setdefault("selection", "auto")
         state.setdefault("strategy", config.get("strategy", "weighted_no_repeat"))
-        state.setdefault("default_play_mode", "pingpong" if kind == "idle" else "forward")
+        state.setdefault("default_play_mode", "forward")
         state.setdefault("clips", [])
     config.setdefault("version", 1)
     config.setdefault("layout", "avatar-local-motion")
@@ -415,9 +415,15 @@ def sync_avatar_motion_config(args: argparse.Namespace, metadata: dict) -> None:
     clips.append({
         "action_id": args.action_id,
         "display_name": metadata.get("display_name", args.action_id),
+        "description": metadata.get("description", ""),
+        "best_for": metadata.get("best_for", ""),
         "enabled": bool(metadata.get("enabled", True)),
         "weight": clamp_float(metadata.get("weight", 1.0), 1.0, 0.0, 1000.0),
-        "play_mode": normalize_play_mode(metadata.get("play_mode", "pingpong" if kind == "idle" else "forward")),
+        "play_mode": normalize_play_mode(metadata.get("play_mode", "forward")),
+        "can_reverse": bool(metadata.get("can_reverse", False)),
+        "min_cycles": int(metadata.get("min_cycles", 1) or 1),
+        "max_cycles": int(metadata.get("max_cycles", metadata.get("min_cycles", 1)) or 1),
+        "switch_at_boundary": bool(metadata.get("switch_at_boundary", True)),
         "tags": metadata.get("tags", []),
     })
     state["clips"] = sorted(clips, key=lambda clip: str(clip.get("action_id", "")))

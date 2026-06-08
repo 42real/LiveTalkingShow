@@ -605,7 +605,8 @@ Content-Type: application/json
 - 如果显式传入 `out_root=data/speaking_actions` 或 `out_root=data/idle_actions`，会写入旧版外置目录，用于兼容旧素材管理方式。
 - `source` 可以是允许目录内的视频文件，也可以是允许目录内的图片目录。图片目录中的帧必须同尺寸、同通道；`/motion/source/probe` 和 `/motion/source/video` 只支持视频文件。
 - `max_frames=0` 表示不限制帧数。交互测试建议使用短素材，避免启动时一次性加载太多帧。
-- `play_mode` 支持 `forward`、`pingpong`、`reverse`、`random_direction`。`reverse` 和 `random_direction` 需要配合 `can_reverse=true` 才会倒放。
+- `play_mode` 支持 `forward`、`pingpong`、`reverse`、`random_direction`。`forward` 只正放；`pingpong` 正放后倒放；`reverse` 只倒放；`random_direction` 每次选中时随机正放或倒放。`reverse` 和 `random_direction` 需要配合 `can_reverse=true` 才会倒放；`pingpong` 本身会倒放，不受 `can_reverse` 限制。
+- `strategy` 只决定自动素材池如何选择下一段素材，不控制播放方向。`weighted_no_repeat` 配合 `play_mode=pingpong` 时仍会正放再倒放；要禁用倒放，设置该素材 `play_mode=forward`。
 - `weight` 是自动素材池权重，范围 `0-1000`。`min_cycles` 和 `max_cycles` 范围 `1-100`。
 - `switch_at_boundary=true` 表示音频目标状态变化时，动作素材等当前原子动作播放到边界再切换；嘴型推理仍会随音频立即生效。`enabled=false` 表示该素材不加入 `auto` 自动素材池。
 - 如果请求里带了有效 `sessionid`，生成后会让该 session 重新加载对应素材。
