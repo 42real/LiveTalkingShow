@@ -7,7 +7,76 @@
 
 一个状态可以放多个动作素材。每个素材是一段“原子动作”，运行时可以固定选择某个动作，也可以选择 `auto` 自动素材池，让系统在同一状态下按规则轮换不同动作。
 
-## 目录结构
+## 新版 avatar-local 目录结构
+
+推荐把动作素材和动作播放配置都放到 avatar 自己的目录里。这样交接一个 avatar 时，只需要带走一个目录：
+
+```text
+data/avatars/<avatar_id>/
+  full_imgs/
+  face_imgs/
+  coords.pkl
+  metadata.json
+  motion.json
+  motions/
+    speaking/
+      <action_id>/
+        full_imgs/
+        face_imgs/
+        coords.pkl
+        metadata.json
+        preview.png
+    idle/
+      <action_id>/
+        full_imgs/
+        face_imgs/
+        coords.pkl
+        metadata.json
+        preview.png
+```
+
+`motion.json` 是新版 avatar 格式的开关和动作策略配置。没有这个文件时，avatar 按原有方式运行：使用自身 `full_imgs` 帧循环，并兼容旧的 `data/speaking_actions`、`data/idle_actions` 外置动作目录。
+
+`motion.json` 示例：
+
+```json
+{
+  "version": 1,
+  "layout": "avatar-local-motion",
+  "strategy": "weighted_no_repeat",
+  "states": {
+    "idle": {
+      "path": "motions/idle",
+      "selection": "auto",
+      "strategy": "weighted_no_repeat",
+      "default_play_mode": "pingpong",
+      "clips": []
+    },
+    "speaking": {
+      "path": "motions/speaking",
+      "selection": "auto",
+      "strategy": "weighted_no_repeat",
+      "default_play_mode": "forward",
+      "clips": []
+    }
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 取值 | 说明 |
+| --- | --- | --- |
+| `layout` | `avatar-local-motion` | 标记该 avatar 使用内置动作格式。 |
+| `strategy` | `sequence` / `random` / `weighted_random` / `no_repeat_random` / `weighted_no_repeat` | 全局默认素材池选择策略。 |
+| `states.<kind>.path` | 相对 avatar 目录的路径 | 该状态动作素材目录。 |
+| `states.<kind>.selection` | `auto`、具体 `action_id`、空字符串 | 默认选择。`auto` 表示自动素材池；空字符串表示回到 avatar 原始帧。 |
+| `states.<kind>.default_play_mode` | `forward` / `pingpong` / `reverse` / `random_direction` | 制作或补全素材 metadata 时的默认播放方式。 |
+| `states.<kind>.clips` | 列表 | 素材索引，工具会自动维护；运行时仍以每个素材目录里的 `metadata.json` 为准。 |
+
+## 旧版兼容目录结构
+
+旧版外置动作目录仍可读取，主要用于兼容已经制作好的素材。
 
 说话动作：
 
@@ -56,9 +125,9 @@ data/idle_actions/<avatar_id>/<action_id>/
 uv run --python .venv/bin/python python tools/build_speaking_motion_clip.py \
   --source /path/to/source.mp4 \
   --avatar-id avatar3d2 \
+  --kind speaking \
   --action-id lecture_explain_01 \
   --display-name 普通讲解1 \
-  --out-root data/speaking_actions \
   --start 0 \
   --end 4 \
   --fps 25 \
@@ -80,9 +149,9 @@ uv run --python .venv/bin/python python tools/build_speaking_motion_clip.py \
 uv run --python .venv/bin/python python tools/build_speaking_motion_clip.py \
   --source /path/to/idle.mp4 \
   --avatar-id avatar3d2 \
+  --kind idle \
   --action-id idle_breath_01 \
   --display-name 自然待机1 \
-  --out-root data/idle_actions \
   --start 0 \
   --end 3 \
   --fps 25 \
@@ -105,9 +174,11 @@ uv run --python .venv/bin/python python tools/build_speaking_motion_clip.py \
 | --- | --- | --- |
 | `--source` | 允许目录内的视频或图片目录 | 源素材。图片目录里的帧必须同尺寸、同通道。 |
 | `--avatar-id` | 简单目录名 | 动作归属的 avatar。 |
+| `--kind` | `speaking`、`idle` | 动作状态。新版 avatar-local 默认用这个决定输出到 `motions/<kind>`。 |
 | `--action-id` | 英文、数字、`_`、`-` | 动作素材编号。 |
 | `--display-name` | 文本 | 前端显示名。 |
-| `--out-root` | `data/speaking_actions` 或 `data/idle_actions` | 输出到说话动作或静息动作目录。 |
+| `--layout` | `avatar-local`、`legacy` | 默认 `avatar-local`，输出到 `data/avatars/<avatar_id>/motions/<kind>` 并维护 `motion.json`。 |
+| `--out-root` | 空或旧外置目录 | 为空时用新版 avatar-local；显式填写 `data/speaking_actions` 或 `data/idle_actions` 时写旧版外置格式。 |
 | `--start` / `--end` | 秒数，`end` 可省略 | 从源视频截取的时间段。 |
 | `--fps` | 建议 15-30 | 输出帧率。帧率越高越顺，但素材更大、加载更慢。 |
 | `--img-size` | 常用 256 | Wav2Lip 脸部输入尺寸。当前 256 版模型建议用 256。 |
@@ -137,6 +208,7 @@ uv run --python .venv/bin/python python tools/build_speaking_motion_clip.py \
 
 ```yaml
 avatar_id: avatar3d2
+layout: avatar-local
 
 defaults:
   fps: 25
@@ -190,6 +262,15 @@ uv run --python .venv/bin/python python tools/build_motion_clips.py \
 
 如果希望某个素材失败后继续生成后面的素材，加 `--continue-on-error`。
 
+批量制作完成后，目录会变成：
+
+```text
+data/avatars/avatar3d2/motion.json
+data/avatars/avatar3d2/motions/speaking/lecture_explain_01/
+data/avatars/avatar3d2/motions/speaking/lecture_emphasis_01/
+data/avatars/avatar3d2/motions/idle/idle_breath_01/
+```
+
 ## 运行时选择
 
 启动 LiveTalking 后，可以在测试客户端主页面选择：
@@ -222,7 +303,7 @@ curl -X POST "http://127.0.0.1:8050/motion/select" \
   }'
 ```
 
-自动素材池策略通过环境变量配置：
+自动素材池策略优先从 avatar 的 `motion.json` 读取，也可以用环境变量临时覆盖：
 
 | 环境变量 | 说明 |
 | --- | --- |

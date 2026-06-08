@@ -458,7 +458,15 @@ POST 也可以使用独立字段：
 
 ## 7. 动作素材接口
 
-动作素材接口用于把一段源视频切成可复用的说话动作或静息动作。说话动作保存在 `data/speaking_actions/<avatar_id>/<action_id>`，静息动作保存在 `data/idle_actions/<avatar_id>/<action_id>`。
+动作素材接口用于把一段源视频切成可复用的说话动作或静息动作。新版 avatar-local 格式会把动作和配置都放在 `data/avatars/<avatar_id>/` 下：
+
+```text
+data/avatars/<avatar_id>/motion.json
+data/avatars/<avatar_id>/motions/speaking/<action_id>/
+data/avatars/<avatar_id>/motions/idle/<action_id>/
+```
+
+没有 `motion.json` 的旧 avatar 会继续按原有方式运行，并兼容旧外置目录 `data/speaking_actions/<avatar_id>/<action_id>`、`data/idle_actions/<avatar_id>/<action_id>`。
 
 安全限制：
 
@@ -593,7 +601,8 @@ Content-Type: application/json
 
 说明：
 
-- `kind=speaking` 会写入 `data/speaking_actions`，`kind=idle` 会写入 `data/idle_actions`。
+- 默认不传 `out_root` 时，会写入新版 avatar-local 目录 `data/avatars/<avatar_id>/motions/<kind>/<action_id>`，并自动创建或更新 `data/avatars/<avatar_id>/motion.json`。
+- 如果显式传入 `out_root=data/speaking_actions` 或 `out_root=data/idle_actions`，会写入旧版外置目录，用于兼容旧素材管理方式。
 - `source` 可以是允许目录内的视频文件，也可以是允许目录内的图片目录。图片目录中的帧必须同尺寸、同通道；`/motion/source/probe` 和 `/motion/source/video` 只支持视频文件。
 - `max_frames=0` 表示不限制帧数。交互测试建议使用短素材，避免启动时一次性加载太多帧。
 - `play_mode` 支持 `forward`、`pingpong`、`reverse`、`random_direction`。`reverse` 和 `random_direction` 需要配合 `can_reverse=true` 才会倒放。
@@ -652,7 +661,7 @@ Content-Type: application/json
 }
 ```
 
-该接口只修改素材目录名和 `metadata.json`，不会重新生成帧。运行中的 session 会重新加载对应状态的素材。
+该接口只修改素材目录名和 `metadata.json`，不会重新生成帧。新版 avatar-local 素材还会同步更新 `motion.json` 中的素材索引。运行中的 session 会重新加载对应状态的素材。
 
 删除素材：
 
@@ -660,6 +669,8 @@ Content-Type: application/json
 POST /motion/clips/delete
 Content-Type: application/json
 ```
+
+新版 avatar-local 素材删除后会同步从 `motion.json` 索引中移除。
 
 ```json
 {

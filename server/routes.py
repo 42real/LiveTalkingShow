@@ -59,6 +59,7 @@ MOTION_UPLOAD_MAX_BYTES = int(os.getenv("MOTION_UPLOAD_MAX_BYTES", str(512 * 102
 MOTION_ALLOWED_SOURCE_DIRS = ("tmp/uploaded_sources", "data")
 MOTION_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 MOTION_PLAY_MODES = {"forward", "pingpong", "reverse", "random_direction"}
+AVATAR_MOTION_CONFIG = "motion.json"
 
 
 @dataclass
@@ -186,6 +187,38 @@ def _motion_kind(params: dict) -> str:
 
 def _motion_root_for_kind(kind: str) -> str:
     return "data/idle_actions" if kind == "idle" else "data/speaking_actions"
+
+
+def _avatar_motion_config_path(avatar_id: str) -> Path:
+    return Path.cwd() / "data" / "avatars" / avatar_id / AVATAR_MOTION_CONFIG
+
+
+def _avatar_uses_local_motion_format(avatar_id: str) -> bool:
+    return _avatar_motion_config_path(avatar_id).exists()
+
+
+def _avatar_motion_root(avatar_id: str, kind: str) -> Path:
+    return Path.cwd() / "data" / "avatars" / avatar_id / "motions" / kind
+
+
+def _legacy_motion_root(avatar_id: str, kind: str) -> Path:
+    return Path.cwd() / _motion_root_for_kind(kind) / avatar_id
+
+
+def _motion_clip_root(avatar_id: str, kind: str, out_root: str = "") -> Path:
+    raw_root = str(out_root or "").strip()
+    if raw_root:
+        return _motion_output_root(kind, raw_root) / avatar_id
+    if _avatar_uses_local_motion_format(avatar_id):
+        return _avatar_motion_root(avatar_id, kind)
+    return _legacy_motion_root(avatar_id, kind)
+
+
+def _motion_create_clip_root(avatar_id: str, kind: str, out_root: str = "") -> Path:
+    raw_root = str(out_root or "").strip()
+    if raw_root:
+        return _motion_output_root(kind, raw_root) / avatar_id
+    return _avatar_motion_root(avatar_id, kind)
 
 
 def _motion_output_root(kind: str, out_root: str = "") -> Path:
@@ -463,12 +496,13 @@ def _motion_avatar_id(params: dict, avatar_session) -> str:
     return _clean_motion_id(avatar_id, "avatar_id")
 
 
-def _list_motion_clip_metadata(avatar_id: str, out_root: str = "data/speaking_actions") -> list[dict]:
-    root = Path(out_root) / avatar_id
+def _list_motion_clip_metadata(avatar_id: str, out_root: str = "", kind: str = "speaking") -> list[dict]:
+    if out_root:
+        kind = "idle" if str(out_root).replace("\\", "/").rstrip("/").endswith("idle_actions") else "speaking"
+    root = _motion_clip_root(avatar_id, kind, out_root)
     if not root.is_dir():
         return []
 
-    kind = "idle" if str(out_root).replace("\\", "/").rstrip("/").endswith("idle_actions") else "speaking"
     clips = []
     for action_dir in sorted([path for path in root.iterdir() if path.is_dir()], key=lambda path: path.name):
         metadata_path = action_dir / "metadata.json"
@@ -495,6 +529,81 @@ def _list_motion_clip_metadata(avatar_id: str, out_root: str = "data/speaking_ac
         metadata["current"] = False
         clips.append(metadata)
     return clips
+
+
+def _read_avatar_motion_config(avatar_id: str) -> dict:
+    config_path = _avatar_motion_config_path(avatar_id)
+    if not config_path.exists():
+        return {}
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8-sig") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_avatar_motion_config(avatar_id: str, config: dict) -> None:
+    config_path = _avatar_motion_config_path(avatar_id)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _ensure_avatar_motion_config(avatar_id: str) -> dict:
+    config = _read_avatar_motion_config(avatar_id)
+    if not config:
+        config = {
+            "version": 1,
+            "layout": "avatar-local-motion",
+            "strategy": os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"),
+            "states": {
+                "idle": {
+                    "path": "motions/idle",
+                    "selection": "auto",
+                    "strategy": os.getenv("LIVETALKING_IDLE_MOTION_STRATEGY", "weighted_no_repeat"),
+                    "default_play_mode": "pingpong",
+                },
+                "speaking": {
+                    "path": "motions/speaking",
+                    "selection": "auto",
+                    "strategy": os.getenv("LIVETALKING_SPEAKING_MOTION_STRATEGY", "weighted_no_repeat"),
+                    "default_play_mode": "forward",
+                },
+            },
+        }
+    states = config.setdefault("states", {})
+    for kind in ("idle", "speaking"):
+        state = states.setdefault(kind, {})
+        state.setdefault("path", f"motions/{kind}")
+        state.setdefault("selection", "auto")
+        state.setdefault("strategy", os.getenv(
+            "LIVETALKING_IDLE_MOTION_STRATEGY" if kind == "idle" else "LIVETALKING_SPEAKING_MOTION_STRATEGY",
+            os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"),
+        ))
+        state.setdefault("default_play_mode", "pingpong" if kind == "idle" else "forward")
+    config.setdefault("version", 1)
+    config.setdefault("layout", "avatar-local-motion")
+    config.setdefault("strategy", os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"))
+    _write_avatar_motion_config(avatar_id, config)
+    return config
+
+
+def _sync_avatar_motion_clip_config(avatar_id: str, kind: str, action_id: str, metadata: dict | None, remove: bool = False) -> None:
+    config = _ensure_avatar_motion_config(avatar_id)
+    state = config.setdefault("states", {}).setdefault(kind, {})
+    clips = state.setdefault("clips", [])
+    clips = [clip for clip in clips if isinstance(clip, dict) and clip.get("action_id") != action_id]
+    if not remove:
+        metadata = metadata or {}
+        clips.append({
+            "action_id": action_id,
+            "display_name": metadata.get("display_name", action_id),
+            "enabled": _bool_param(metadata.get("enabled"), True),
+            "weight": _float_param(metadata.get("weight"), 1.0, 0.0, 1000.0),
+            "play_mode": _motion_play_mode(metadata.get("play_mode"), "pingpong" if kind == "idle" else "forward"),
+            "tags": _motion_tags(metadata.get("tags", [])),
+        })
+    state["clips"] = sorted(clips, key=lambda clip: str(clip.get("action_id", "")))
+    _write_avatar_motion_config(avatar_id, config)
 
 
 def _clip_text(clip: dict) -> str:
@@ -1023,11 +1132,11 @@ async def motion_clips(request):
         avatar_session = get_session(request, sessionid) if sessionid else None
         if avatar_session is None:
             avatar_id = _clean_motion_id(params.get("avatar_id", os.getenv("AVATAR_ID", "")), "avatar_id")
-            out_root = str(_motion_output_root(kind, params.get("out_root", "")))
+            out_root = str(_motion_output_root(kind, params["out_root"])) if params.get("out_root") else ""
             return json_ok(data={
                 "sessionid": sessionid,
                 "kind": kind,
-                "clips": _list_motion_clip_metadata(avatar_id, out_root),
+                "clips": _list_motion_clip_metadata(avatar_id, out_root, kind),
             })
         list_method = "list_idle_motions" if kind == "idle" else "list_speaking_motions"
         if not hasattr(avatar_session, list_method):
@@ -1063,7 +1172,7 @@ async def motion_plan(request):
         if avatar_session is not None and hasattr(avatar_session, "list_speaking_motions"):
             clips = avatar_session.list_speaking_motions()
         else:
-            clips = _list_motion_clip_metadata(avatar_id, _motion_root_for_kind("speaking"))
+            clips = _list_motion_clip_metadata(avatar_id, _motion_root_for_kind("speaking"), "speaking")
         clips = [_compact_motion_clip(clip) for clip in clips if clip.get("action_id")]
         if not clips:
             return json_error("no speaking motion clips found")
@@ -1225,9 +1334,8 @@ async def motion_update_clip(request):
         avatar_id = _motion_avatar_id(params, avatar_session)
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
         next_action_id = _clean_motion_id(params.get("next_action_id", action_id), "next_action_id")
-        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
-
-        root = Path(out_root) / avatar_id
+        explicit_out_root = str(params.get("out_root", "")).strip()
+        root = _motion_clip_root(avatar_id, kind, explicit_out_root)
         source_dir = root / action_id
         if not source_dir.is_dir():
             return json_error(f"motion clip not found: {action_id}")
@@ -1292,6 +1400,8 @@ async def motion_update_clip(request):
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
+            _sync_avatar_motion_clip_config(avatar_id, kind, next_action_id, metadata)
 
         clips = None
         selected = None
@@ -1328,9 +1438,8 @@ async def motion_delete_clip(request):
         avatar_session = get_session(request, sessionid) if sessionid else None
         avatar_id = _motion_avatar_id(params, avatar_session)
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
-        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
-
-        root = (Path(out_root) / avatar_id).resolve()
+        explicit_out_root = str(params.get("out_root", "")).strip()
+        root = _motion_clip_root(avatar_id, kind, explicit_out_root).resolve()
         target_dir = (root / action_id).resolve()
         if root not in target_dir.parents:
             return json_error("invalid motion clip path")
@@ -1346,6 +1455,8 @@ async def motion_delete_clip(request):
         )
 
         shutil.rmtree(target_dir)
+        if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
+            _sync_avatar_motion_clip_config(avatar_id, kind, action_id, None, remove=True)
 
         clips = None
         selected = None
@@ -1355,7 +1466,7 @@ async def motion_delete_clip(request):
                 selected = getattr(avatar_session, select_method)("")
 
         if clips is None:
-            clips = _list_motion_clip_metadata(avatar_id, str(root.parent))
+            clips = _list_motion_clip_metadata(avatar_id, explicit_out_root, kind)
 
         return json_ok(data={
             "sessionid": sessionid,
@@ -1391,8 +1502,9 @@ async def motion_create_clip(request):
         if not source:
             return json_error("source is required")
 
-        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
-        target_dir = Path(out_root) / avatar_id / action_id
+        explicit_out_root = str(params.get("out_root", "")).strip()
+        target_root = _motion_create_clip_root(avatar_id, kind, explicit_out_root)
+        target_dir = target_root / action_id
         if target_dir.exists() and not (target_dir / "metadata.json").exists():
             logger.info("remove incomplete motion clip before rebuild: %s", target_dir)
             shutil.rmtree(target_dir)
@@ -1420,7 +1532,7 @@ async def motion_create_clip(request):
             avatar_id=avatar_id,
             action_id=action_id,
             display_name=str(params.get("display_name", "")).strip(),
-            out_root=out_root,
+            out_root=str(target_root.parent),
             start=float(params.get("start", 0) or 0),
             end=float(params["end"]) if params.get("end") not in (None, "") else None,
             fps=float(params.get("fps", 25) or 25),
@@ -1455,13 +1567,15 @@ async def motion_create_clip(request):
                 logger.info("remove incomplete motion clip after failed build: %s", target_dir)
                 shutil.rmtree(target_dir)
             raise
-        metadata_path = Path(out_root) / avatar_id / action_id / "metadata.json"
+        metadata_path = target_dir / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["kind"] = kind
         metadata_path.write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
+            _sync_avatar_motion_clip_config(avatar_id, kind, action_id, metadata)
         clips = None
         reload_method = "reload_idle_motions" if kind == "idle" else "reload_speaking_motions"
         if avatar_session is not None and hasattr(avatar_session, reload_method):

@@ -25,6 +25,8 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 DEFAULT_FFMPEG = which("ffmpeg") or "ffmpeg"
 PLAY_MODES = {"forward", "pingpong", "reverse", "random_direction"}
+MOTION_STRATEGIES = {"sequence", "random", "weighted_random", "no_repeat_random", "weighted_no_repeat"}
+AVATAR_MOTION_CONFIG = "motion.json"
 
 
 def normalize_play_mode(value: str, default: str = "forward") -> str:
@@ -34,6 +36,10 @@ def normalize_play_mode(value: str, default: str = "forward") -> str:
 
 def infer_kind_from_out_root(out_root: str) -> str:
     normalized = str(out_root or "").replace("\\", "/").rstrip("/")
+    if normalized.endswith("/motions/idle") or normalized.endswith("motions/idle"):
+        return "idle"
+    if normalized.endswith("/motions/speaking") or normalized.endswith("motions/speaking"):
+        return "speaking"
     return "idle" if normalized.endswith("idle_actions") else "speaking"
 
 
@@ -339,9 +345,88 @@ def make_preview(frame: np.ndarray, box: tuple[int, int, int, int], label: str) 
     return preview
 
 
+def target_root_for_args(args: argparse.Namespace) -> Path:
+    layout = str(getattr(args, "layout", "avatar-local") or "avatar-local").strip().lower()
+    kind = str(getattr(args, "kind", "") or "").strip().lower()
+    if kind in {"idle", "silent", "silence", "rest"}:
+        kind = "idle"
+    elif kind != "speaking":
+        kind = infer_kind_from_out_root(getattr(args, "out_root", ""))
+
+    out_root = str(getattr(args, "out_root", "") or "").strip()
+    if layout == "legacy" or out_root:
+        root = Path(out_root or ("data/idle_actions" if kind == "idle" else "data/speaking_actions"))
+        return root / args.avatar_id / args.action_id
+    return Path("data") / "avatars" / args.avatar_id / "motions" / kind / args.action_id
+
+
+def read_avatar_motion_config(avatar_id: str) -> dict:
+    path = Path("data") / "avatars" / avatar_id / AVATAR_MOTION_CONFIG
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_avatar_motion_config(avatar_id: str, config: dict) -> None:
+    path = Path("data") / "avatars" / avatar_id / AVATAR_MOTION_CONFIG
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def ensure_avatar_motion_config(avatar_id: str) -> dict:
+    config = read_avatar_motion_config(avatar_id)
+    if not config:
+        config = {
+            "version": 1,
+            "layout": "avatar-local-motion",
+            "strategy": "weighted_no_repeat",
+            "states": {},
+        }
+    states = config.setdefault("states", {})
+    for kind in ("idle", "speaking"):
+        state = states.setdefault(kind, {})
+        state.setdefault("path", f"motions/{kind}")
+        state.setdefault("selection", "auto")
+        state.setdefault("strategy", config.get("strategy", "weighted_no_repeat"))
+        state.setdefault("default_play_mode", "pingpong" if kind == "idle" else "forward")
+        state.setdefault("clips", [])
+    config.setdefault("version", 1)
+    config.setdefault("layout", "avatar-local-motion")
+    config.setdefault("strategy", "weighted_no_repeat")
+    write_avatar_motion_config(avatar_id, config)
+    return config
+
+
+def sync_avatar_motion_config(args: argparse.Namespace, metadata: dict) -> None:
+    layout = str(getattr(args, "layout", "avatar-local") or "avatar-local").strip().lower()
+    if layout == "legacy" or str(getattr(args, "out_root", "") or "").strip():
+        return
+    kind = str(metadata.get("kind") or "speaking").strip().lower()
+    if kind not in {"idle", "speaking"}:
+        kind = "speaking"
+    config = ensure_avatar_motion_config(args.avatar_id)
+    state = config.setdefault("states", {}).setdefault(kind, {})
+    clips = state.setdefault("clips", [])
+    clips = [clip for clip in clips if isinstance(clip, dict) and clip.get("action_id") != args.action_id]
+    clips.append({
+        "action_id": args.action_id,
+        "display_name": metadata.get("display_name", args.action_id),
+        "enabled": bool(metadata.get("enabled", True)),
+        "weight": clamp_float(metadata.get("weight", 1.0), 1.0, 0.0, 1000.0),
+        "play_mode": normalize_play_mode(metadata.get("play_mode", "pingpong" if kind == "idle" else "forward")),
+        "tags": metadata.get("tags", []),
+    })
+    state["clips"] = sorted(clips, key=lambda clip: str(clip.get("action_id", "")))
+    write_avatar_motion_config(args.avatar_id, config)
+
+
 def build_clip(args: argparse.Namespace) -> None:
     source = Path(args.source)
-    target = Path(args.out_root) / args.avatar_id / args.action_id
+    target = target_root_for_args(args)
     full_dir = target / "full_imgs"
     face_dir = target / "face_imgs"
     coords_path = target / "coords.pkl"
@@ -410,7 +495,7 @@ def build_clip(args: argparse.Namespace) -> None:
         "action_id": args.action_id,
         "display_name": args.display_name or args.action_id,
         "avatar_id": args.avatar_id,
-        "kind": infer_kind_from_out_root(args.out_root),
+        "kind": infer_kind_from_out_root(str(target.parent)),
         "source": str(source),
         "cut_video": str(cut_video_path) if cut_video_path else "",
         "source_info": source_info,
@@ -436,6 +521,7 @@ def build_clip(args: argparse.Namespace) -> None:
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    sync_avatar_motion_config(args, metadata)
 
     print(f"motion clip: {target}")
     print(f"frames: {len(frames)}")
@@ -449,7 +535,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--avatar-id", required=True)
     parser.add_argument("--action-id", required=True)
     parser.add_argument("--display-name", default="")
-    parser.add_argument("--out-root", default="data/speaking_actions")
+    parser.add_argument("--kind", default="speaking", choices=["speaking", "idle"], help="Motion state for avatar-local layout.")
+    parser.add_argument("--layout", default="avatar-local", choices=["avatar-local", "legacy"], help="avatar-local writes under data/avatars/<avatar_id>/motions; legacy uses data/*_actions.")
+    parser.add_argument("--out-root", default="", help="Explicit legacy output root. If set, overrides --layout.")
     parser.add_argument("--start", type=float, default=0.0)
     parser.add_argument("--end", type=float)
     parser.add_argument("--fps", type=float, default=25.0)

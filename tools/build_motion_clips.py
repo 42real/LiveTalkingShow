@@ -67,7 +67,9 @@ def namespace_from_clip(manifest: dict, defaults: dict, clip: dict) -> SimpleNam
         avatar_id=avatar_id,
         action_id=action_id,
         display_name=str(clip.get("display_name", "")).strip(),
-        out_root=str(get_value(clip, defaults, "out_root", out_root_for_kind(kind))),
+        kind=kind,
+        layout=str(get_value(clip, defaults, "layout", manifest.get("layout", "avatar-local"))),
+        out_root=str(get_value(clip, defaults, "out_root", "")),
         start=float(get_value(clip, defaults, "start", 0) or 0),
         end=float(get_value(clip, defaults, "end")) if get_value(clip, defaults, "end") not in (None, "") else None,
         fps=float(get_value(clip, defaults, "fps", 25) or 25),
@@ -119,7 +121,8 @@ def main() -> None:
                 continue
             raise RuntimeError(f"clip {index} must be an object")
         build_args = namespace_from_clip(manifest, defaults, clip)
-        print(f"[{index}/{len(clips)}] build {build_args.out_root}/{build_args.avatar_id}/{build_args.action_id}")
+        layout_label = build_args.out_root or f"data/avatars/{build_args.avatar_id}/motions/{build_args.kind}"
+        print(f"[{index}/{len(clips)}] build {layout_label}/{build_args.action_id}")
         try:
             build_clip(build_args)
         except Exception as exc:

@@ -256,7 +256,7 @@ curl -X POST http://127.0.0.1:8050/motion/select \
   }'
 ```
 
-Wav2Lip 支持给 `speaking` 和 `idle` 两个状态分别制作多个动作素材，并用 `auto` 自动素材池轮换播放。制作流程、素材要求、批量 manifest 和参数范围见 [docs/SPEAKING-MOTION-CLIPS.md](docs/SPEAKING-MOTION-CLIPS.md)。
+Wav2Lip 支持新版 avatar-local 动作格式：动作素材和 `motion.json` 都放在 `data/avatars/<avatar_id>/` 下。`speaking` 和 `idle` 两个状态可以分别制作多个动作素材，并用 `auto` 自动素材池轮换播放。没有 `motion.json` 的 avatar 继续按原有方式运行。制作流程、素材要求、批量 manifest 和参数范围见 [docs/SPEAKING-MOTION-CLIPS.md](docs/SPEAKING-MOTION-CLIPS.md)。
 
 ## 5. avatar 制作和导入
 
@@ -264,6 +264,19 @@ avatar 目录统一放在：
 
 ```text
 data/avatars/<avatar_id>/
+```
+
+新版带动作 avatar 推荐结构：
+
+```text
+data/avatars/<avatar_id>/
+  full_imgs/
+  face_imgs/
+  coords.pkl
+  motion.json
+  motions/
+    speaking/<action_id>/
+    idle/<action_id>/
 ```
 
 切换数字人：

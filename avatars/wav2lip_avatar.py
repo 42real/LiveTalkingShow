@@ -54,6 +54,8 @@ WAV2LIP_FACE_SIZE = 256
 MOTION_POOL_TOKENS = {"auto", "pool", "all", "*"}
 MOTION_DEFAULT_TOKENS = {"", "default", "none", "null"}
 MOTION_PLAY_MODES = {"forward", "pingpong", "reverse", "random_direction"}
+MOTION_STRATEGIES = {"sequence", "random", "weighted_random", "no_repeat_random", "weighted_no_repeat"}
+AVATAR_MOTION_CONFIG = "motion.json"
 
 def _parse_runtime_pads(default_pads):
     raw = os.getenv("LIVETALKING_RUNTIME_PADS", "").strip()
@@ -165,50 +167,98 @@ def _load_avatar_bundle(avatar_path):
 def load_avatar(avatar_id):
     return _load_avatar_bundle(f"./data/avatars/{avatar_id}")
 
-def load_motion_clips(avatar_id, root_name="speaking_actions"):
-    root = f"./data/{root_name}/{avatar_id}"
-    if not os.path.isdir(root):
+def _load_avatar_motion_config(avatar_id):
+    config_path = os.path.join("./data/avatars", avatar_id, AVATAR_MOTION_CONFIG)
+    if not os.path.exists(config_path):
         return {}
+    with open(config_path, "r", encoding="utf-8-sig") as file:
+        data = json.load(file) or {}
+    if not isinstance(data, dict):
+        logger.warning("invalid avatar motion config: %s", config_path)
+        return {}
+    return data
 
+def _avatar_motion_root(avatar_id, kind):
+    return os.path.join("./data/avatars", avatar_id, "motions", kind)
+
+def _legacy_motion_root(avatar_id, kind):
+    return os.path.join("./data", "idle_actions" if kind == "idle" else "speaking_actions", avatar_id)
+
+def _motion_roots_for_kind(avatar_id, kind, motion_config=None):
+    motion_config = motion_config if isinstance(motion_config, dict) else {}
+    if motion_config:
+        states = motion_config.get("states") if isinstance(motion_config.get("states"), dict) else {}
+        state_config = states.get(kind) if isinstance(states.get(kind), dict) else {}
+        root = str(state_config.get("path") or state_config.get("root") or "").strip()
+        if root:
+            if not os.path.isabs(root):
+                root = os.path.join("./data/avatars", avatar_id, root)
+            return [root]
+        return [_avatar_motion_root(avatar_id, kind)]
+    return [_legacy_motion_root(avatar_id, kind)]
+
+def _motion_strategy_from_config(motion_config, kind):
+    if not isinstance(motion_config, dict):
+        return ""
+    states = motion_config.get("states") if isinstance(motion_config.get("states"), dict) else {}
+    state_config = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    strategy = str(state_config.get("strategy") or motion_config.get("strategy") or "").strip().lower()
+    return strategy if strategy in MOTION_STRATEGIES else ""
+
+def _motion_selection_from_config(motion_config, kind):
+    if not isinstance(motion_config, dict):
+        return None
+    states = motion_config.get("states") if isinstance(motion_config.get("states"), dict) else {}
+    state_config = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    selection = state_config.get("selection", state_config.get("default", state_config.get("default_action")))
+    if selection is None:
+        selection = motion_config.get(f"{kind}_selection")
+    return selection
+
+def load_motion_clips(avatar_id, kind="speaking", motion_config=None):
+    roots = _motion_roots_for_kind(avatar_id, kind, motion_config)
     clips = {}
-    for action_id in sorted(os.listdir(root)):
-        action_path = os.path.join(root, action_id)
-        if not os.path.isdir(action_path):
+    for root in roots:
+        if not os.path.isdir(root):
             continue
-        try:
-            frames, faces, coords, metadata = _load_avatar_bundle(action_path)
-        except Exception as exc:
-            logger.warning("skip %s motion clip %s: %s", root_name, action_path, exc)
-            continue
-        kind = "idle" if root_name == "idle_actions" else "speaking"
-        metadata["action_id"] = action_id
-        metadata.setdefault("display_name", action_id)
-        metadata.setdefault("kind", kind)
-        metadata["play_mode"] = _normalize_play_mode(
-            metadata.get("play_mode"),
-            "pingpong" if kind == "idle" else "forward",
-        )
-        metadata["can_reverse"] = _bool_metadata(metadata.get("can_reverse"), False)
-        metadata["weight"] = _float_metadata(metadata.get("weight"), 1.0, 0.0, 1000.0)
-        metadata["min_cycles"] = _int_metadata(metadata.get("min_cycles"), 1, 1, 100)
-        metadata["max_cycles"] = _int_metadata(metadata.get("max_cycles"), metadata["min_cycles"], 1, 100)
-        if metadata["max_cycles"] < metadata["min_cycles"]:
-            metadata["max_cycles"] = metadata["min_cycles"]
-        metadata["switch_at_boundary"] = _bool_metadata(metadata.get("switch_at_boundary"), True)
-        metadata["enabled"] = _bool_metadata(metadata.get("enabled"), True)
-        clips[action_id] = {
-            "frames": frames,
-            "faces": faces,
-            "coords": coords,
-            "metadata": metadata,
-        }
+        for action_id in sorted(os.listdir(root)):
+            action_path = os.path.join(root, action_id)
+            if not os.path.isdir(action_path):
+                continue
+            try:
+                frames, faces, coords, metadata = _load_avatar_bundle(action_path)
+            except Exception as exc:
+                logger.warning("skip %s motion clip %s: %s", kind, action_path, exc)
+                continue
+            metadata["action_id"] = action_id
+            metadata.setdefault("display_name", action_id)
+            metadata.setdefault("kind", kind)
+            metadata.setdefault("path", action_path)
+            metadata["play_mode"] = _normalize_play_mode(
+                metadata.get("play_mode"),
+                "pingpong" if kind == "idle" else "forward",
+            )
+            metadata["can_reverse"] = _bool_metadata(metadata.get("can_reverse"), False)
+            metadata["weight"] = _float_metadata(metadata.get("weight"), 1.0, 0.0, 1000.0)
+            metadata["min_cycles"] = _int_metadata(metadata.get("min_cycles"), 1, 1, 100)
+            metadata["max_cycles"] = _int_metadata(metadata.get("max_cycles"), metadata["min_cycles"], 1, 100)
+            if metadata["max_cycles"] < metadata["min_cycles"]:
+                metadata["max_cycles"] = metadata["min_cycles"]
+            metadata["switch_at_boundary"] = _bool_metadata(metadata.get("switch_at_boundary"), True)
+            metadata["enabled"] = _bool_metadata(metadata.get("enabled"), True)
+            clips[action_id] = {
+                "frames": frames,
+                "faces": faces,
+                "coords": coords,
+                "metadata": metadata,
+            }
     return clips
 
-def load_speaking_motion_clips(avatar_id):
-    return load_motion_clips(avatar_id, "speaking_actions")
+def load_speaking_motion_clips(avatar_id, motion_config=None):
+    return load_motion_clips(avatar_id, "speaking", motion_config)
 
-def load_idle_motion_clips(avatar_id):
-    return load_motion_clips(avatar_id, "idle_actions")
+def load_idle_motion_clips(avatar_id, motion_config=None):
+    return load_motion_clips(avatar_id, "idle", motion_config)
 
 @torch.no_grad()
 def warm_up(batch_size,model,modelres):
@@ -232,10 +282,15 @@ class LipReal(BaseAvatar):
         self.model = model
         self.face_input_size = WAV2LIP_FACE_SIZE
         self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle,self.metadata = avatar
-        self.motion_clips = load_speaking_motion_clips(getattr(opt, "avatar_id", ""))
-        self.idle_motion_clips = load_idle_motion_clips(getattr(opt, "avatar_id", ""))
-        self.current_motion_clip_id = None
-        self.current_idle_clip_id = None
+        self.motion_config = _load_avatar_motion_config(getattr(opt, "avatar_id", ""))
+        self.motion_clips = load_speaking_motion_clips(getattr(opt, "avatar_id", ""), self.motion_config)
+        self.idle_motion_clips = load_idle_motion_clips(getattr(opt, "avatar_id", ""), self.motion_config)
+        self.current_motion_clip_id = _motion_selection_from_config(self.motion_config, "speaking")
+        self.current_idle_clip_id = _motion_selection_from_config(self.motion_config, "idle")
+        if self.current_motion_clip_id is not None:
+            self.current_motion_clip_id = str(self.current_motion_clip_id).strip()
+        if self.current_idle_clip_id is not None:
+            self.current_idle_clip_id = str(self.current_idle_clip_id).strip()
         self._motion_lock = RLock()
         self._motion_rng = random.Random()
         self._motion_player = {
@@ -254,6 +309,8 @@ class LipReal(BaseAvatar):
             logger.info("loaded speaking motion clips: %s", sorted(self.motion_clips.keys()))
         if self.idle_motion_clips:
             logger.info("loaded idle motion clips: %s", sorted(self.idle_motion_clips.keys()))
+        if self.motion_config:
+            logger.info("loaded avatar motion config for %s", getattr(opt, "avatar_id", ""))
         generation_pads = self.metadata.get("generation_pads", self.metadata.get("baked_pads", [0, 0, 0, 0]))
         self.generation_pads = self._normalize_pads(generation_pads)
         self.runtime_pads = _parse_runtime_pads(self.generation_pads)
@@ -274,7 +331,8 @@ class LipReal(BaseAvatar):
 
     def reload_speaking_motions(self):
         with self._motion_lock:
-            self.motion_clips = load_speaking_motion_clips(getattr(self.opt, "avatar_id", ""))
+            self.motion_config = _load_avatar_motion_config(getattr(self.opt, "avatar_id", ""))
+            self.motion_clips = load_speaking_motion_clips(getattr(self.opt, "avatar_id", ""), self.motion_config)
             if self.current_motion_clip_id not in self.motion_clips and not self._is_pool_selection(self.current_motion_clip_id):
                 self.current_motion_clip_id = None
             self._stop_current_clip_if_kind("speaking")
@@ -283,7 +341,8 @@ class LipReal(BaseAvatar):
 
     def reload_idle_motions(self):
         with self._motion_lock:
-            self.idle_motion_clips = load_idle_motion_clips(getattr(self.opt, "avatar_id", ""))
+            self.motion_config = _load_avatar_motion_config(getattr(self.opt, "avatar_id", ""))
+            self.idle_motion_clips = load_idle_motion_clips(getattr(self.opt, "avatar_id", ""), self.motion_config)
             if self.current_idle_clip_id not in self.idle_motion_clips and not self._is_pool_selection(self.current_idle_clip_id):
                 self.current_idle_clip_id = None
             self._stop_current_clip_if_kind("idle")
@@ -385,9 +444,9 @@ class LipReal(BaseAvatar):
 
     def _motion_strategy(self, kind):
         env_name = "LIVETALKING_IDLE_MOTION_STRATEGY" if kind == "idle" else "LIVETALKING_SPEAKING_MOTION_STRATEGY"
-        strategy = os.getenv(env_name, os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat")).strip().lower()
-        allowed = {"sequence", "random", "weighted_random", "no_repeat_random", "weighted_no_repeat"}
-        return strategy if strategy in allowed else "weighted_no_repeat"
+        config_strategy = _motion_strategy_from_config(self.motion_config, kind)
+        strategy = os.getenv(env_name, os.getenv("LIVETALKING_MOTION_STRATEGY", config_strategy or "weighted_no_repeat")).strip().lower()
+        return strategy if strategy in MOTION_STRATEGIES else "weighted_no_repeat"
 
     def _stop_current_clip_if_kind(self, kind):
         if self._motion_player.get("render_kind") == kind:
