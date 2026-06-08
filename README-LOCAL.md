@@ -17,7 +17,7 @@ TTS 服务，默认 8036
 LiveTalking 主服务，默认 8050
   加载 avatar 和 wav2lip/musetalk/ultralight
   接收文字或外部音频
-  推荐输出 packed WebRTC 透明视频，也保留 /alpha/ws 调试视频
+  输出本机 overlay raw alpha 或远程 packed WebRTC 透明视频
 
 显示/测试端，Web 默认 8070，overlay 为本机 Electron
   testclient/web 用来发文字、测接口、看视频
@@ -34,9 +34,9 @@ LiveTalking 主服务，默认 8050
 显示输出统一走：
 
 ```text
-POST /alpha/webrtc/packed_offer  推荐显示链路，WebRTC audio + packed video
-WS /alpha/ws                     调试链路，24 字节帧头 + raw RGBA/JPEG/PNG/WebP payload
-WS /alpha/audio                  调试链路音频，16kHz mono PCM16
+WS /alpha/ws                     本机 overlay 视频，24 字节帧头 + raw BGRA/RGBA/JPEG/PNG/WebP payload
+WS /alpha/audio                  本机 overlay 音频，16kHz mono PCM16
+POST /alpha/webrtc/packed_offer  远程显示链路，WebRTC audio + packed video
 ```
 
 完整协议见 [docs/API-PROTOCOL.md](docs/API-PROTOCOL.md)。
@@ -143,10 +143,12 @@ cd /path/to/LiveTalking/testclient
 ./start-overlay.sh
 ```
 
-远程显示时只改 LiveTalking 地址：
+远程显示时改 LiveTalking 地址，并使用 packed WebRTC：
 
 ```bash
-LIVETALKING_SERVER=http://<LiveTalking机器IP>:8050 ./start-overlay.sh
+LIVETALKING_SERVER=http://<LiveTalking机器IP>:8050 \
+LIVETALKING_OUTPUT=webrtc-packed \
+./start-overlay.sh
 ```
 
 overlay 只负责显示，不负责文字输入，不直接连接 TTS。
@@ -241,7 +243,7 @@ alpha 视频：
 
 ```text
 ws://127.0.0.1:8050/alpha/ws?max_height=720&fps=25&format=jpeg&quality=80
-ws://127.0.0.1:8050/alpha/ws?max_height=1080&fps=15&format=raw
+ws://127.0.0.1:8050/alpha/ws?format=bgra
 ```
 
 动作素材：
@@ -418,8 +420,8 @@ cp .env.example .env
 | `VITE_ALPHA_INPUT_WS` | `ws://127.0.0.1:8050/alpha/input/audio` | `ws/wss` URL | TTS task 推音频目标。 |
 | `VITE_ALPHA_OUTPUT` | `webrtc-packed` | `webrtc-packed` / `ws` | Web 视频输出链路；正常使用保持默认。 |
 | `LIVETALKING_SERVER` | `http://127.0.0.1:8050` | `http/https` URL | overlay 连接的 LiveTalking 地址。 |
-| `LIVETALKING_OUTPUT` | `webrtc-packed` | `webrtc-packed` / `ws` | overlay 视频输出链路；正常使用保持默认。 |
-| `LIVETALKING_PLAY_AUDIO` | `0` | bool：`0/1` | overlay 是否播放 WebRTC 音频轨。 |
+| `LIVETALKING_OUTPUT` | `ws` | `ws` / `webrtc-packed` | overlay 视频输出链路；本机显示用 `ws`，远程显示用 `webrtc-packed`。 |
+| `LIVETALKING_PLAY_AUDIO` | `0` | bool：`0/1` | overlay 是否播放 LiveTalking 输出音频。 |
 
 Web/overlay 的帧率、最大高度、编码格式、渲染器等属于高级排障参数，默认值由代码提供，需要时见 [testclient/README.md](testclient/README.md) 临时覆盖。
 
@@ -445,7 +447,7 @@ curl -X POST http://127.0.0.1:8050/alpha/session \
 | 问题 | 处理 |
 | --- | --- |
 | Web/overlay 连不上 | 检查端口、IP、VS Code/SSH 端口转发和 `.env` 地址。 |
-| overlay 没画面 | 确认 `LIVETALKING_ALPHA_OUTPUT=1`，默认应连接 `/alpha/webrtc/packed_offer`。 |
+| overlay 没画面 | 确认 `LIVETALKING_ALPHA_OUTPUT=1`；本机默认连接 `/alpha/ws`，远程 packed 模式连接 `/alpha/webrtc/packed_offer`。 |
 | 画面尺寸不对 | 检查 `data/avatars/<avatar_id>/full_imgs` 原图宽高；显示缩放不裁剪原图。 |
 | 声音重复 | 保持 `LIVETALKING_PLAY_AUDIO=0`，只让一个组件播放声音。 |
 | 推理卡顿 | 降低 `LIVETALKING_BATCH_SIZE`，降低 overlay/web 拉流 `fps/max_height`。 |

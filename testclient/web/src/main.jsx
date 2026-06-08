@@ -74,7 +74,7 @@ const DEFAULTS = {
   videoMaxWidth: Number.parseInt(paramOrEnv('max_width', 'VITE_ALPHA_VIDEO_MAX_WIDTH', '0'), 10),
   videoMaxHeight: Number.parseInt(paramOrEnv('max_height', 'VITE_ALPHA_VIDEO_MAX_HEIGHT', '0'), 10),
   videoPreviewFps: Number.parseFloat(paramOrEnv('fps', 'VITE_ALPHA_VIDEO_FPS', '25')),
-  videoFormat: paramOrEnv('format', 'VITE_ALPHA_VIDEO_FORMAT', 'raw'),
+  videoFormat: paramOrEnv('format', 'VITE_ALPHA_VIDEO_FORMAT', 'bgra'),
   videoQuality: Number.parseInt(paramOrEnv('quality', 'VITE_ALPHA_VIDEO_QUALITY', '80'), 10),
   videoRenderIntervalMs: Math.max(16, Number.parseInt(paramOrEnv('render_ms', 'VITE_VIDEO_RENDER_INTERVAL_MS', '40'), 10)),
   sharpness: Math.max(0, Math.min(100, Number.parseInt(paramOrEnv('sharpness', 'VITE_ALPHA_SHARPNESS', '0'), 10))),
@@ -125,15 +125,26 @@ function parseFrame(packet) {
   const seq = Number(view.getBigUint64(16, true));
   if (version !== 1 || width <= 0 || height <= 0) return null;
   const payload = packet.slice(24);
-  if (format === 1) {
+  if (format === 1 || format === 5) {
     const pixels = new Uint8ClampedArray(packet, 24);
     if (pixels.byteLength !== width * height * 4) return null;
-    return { width, height, seq, format, pixels };
+    return { width, height, seq, format, pixels, bgra: format === 5 };
   }
   if (format === 2 || format === 3 || format === 4) {
     return { width, height, seq, format, payload };
   }
   return null;
+}
+
+function bgraToRgba(bgra) {
+  const rgba = new Uint8ClampedArray(bgra.byteLength);
+  for (let i = 0; i < bgra.byteLength; i += 4) {
+    rgba[i] = bgra[i + 2];
+    rgba[i + 1] = bgra[i + 1];
+    rgba[i + 2] = bgra[i];
+    rgba[i + 3] = bgra[i + 3];
+  }
+  return rgba;
 }
 
 function waitIceComplete(peer) {
@@ -454,8 +465,12 @@ function App() {
       canvas.height = frame.height;
     }
     const ctx = canvas.getContext('2d');
-    if (frame.format === 1) {
-      ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    if (frame.format === 1 || frame.format === 5) {
+      ctx.putImageData(
+        new ImageData(frame.bgra ? bgraToRgba(frame.pixels) : frame.pixels, frame.width, frame.height),
+        0,
+        0
+      );
     } else {
       const mime = frame.format === 2 ? 'image/jpeg' : frame.format === 3 ? 'image/png' : 'image/webp';
       const bitmap = await createImageBitmap(new Blob([frame.payload], { type: mime }));

@@ -18,22 +18,27 @@ FRAME_FORMAT_RGBA8 = 1
 FRAME_FORMAT_JPEG = 2
 FRAME_FORMAT_PNG = 3
 FRAME_FORMAT_WEBP = 4
+FRAME_FORMAT_BGRA8 = 5
 FRAME_HEADER = struct.Struct("<4sBBHIIQ")
 FRAME_FORMAT_NAMES = {
     FRAME_FORMAT_RGBA8: "raw",
     FRAME_FORMAT_JPEG: "jpeg",
     FRAME_FORMAT_PNG: "png",
     FRAME_FORMAT_WEBP: "webp",
+    FRAME_FORMAT_BGRA8: "bgra",
 }
 FRAME_FORMAT_CODES = {
     "raw": FRAME_FORMAT_RGBA8,
     "rgba": FRAME_FORMAT_RGBA8,
     "rgba8": FRAME_FORMAT_RGBA8,
+    "bgra": FRAME_FORMAT_BGRA8,
+    "bgra8": FRAME_FORMAT_BGRA8,
     "jpeg": FRAME_FORMAT_JPEG,
     "jpg": FRAME_FORMAT_JPEG,
     "png": FRAME_FORMAT_PNG,
     "webp": FRAME_FORMAT_WEBP,
 }
+FRAME_JITTER_WARN_MS = 80.0
 
 
 @dataclass
@@ -64,17 +69,34 @@ class LatestFrameHub:
         self._clients: dict[web.WebSocketResponse, _Client] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_packet: Optional[bytes] = None
+        self._last_packet_format = 0
         self._seq = 0
+        self._published_frames = 0
         self._lock = threading.Lock()
+        self._condition = threading.Condition()
+        self._pending_frame: Optional[np.ndarray] = None
+        self._pending_seq = 0
+        self._pending_drops = 0
+        self._worker = threading.Thread(
+            name="alpha-frame-packetizer",
+            target=self._worker_loop,
+            daemon=True,
+        )
+        self._worker.start()
         self._last_shape: Optional[tuple[int, int, int, str]] = None
         self._last_log_time = 0.0
         self._last_log_seq = 0
+        self._last_log_published_frames = 0
         self._dropped_packets = 0
+        self._dropped_source_frames = 0
         self._convert_ms = 0.0
         self._resize_ms = 0.0
         self._packet_ms = 0.0
         self._send_schedule_ms = 0.0
         self._packet_bytes = 0
+        self._enqueue_ms = 0.0
+        self._last_source_at = 0.0
+        self._last_jitter_log_at = 0.0
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -106,7 +128,16 @@ class LatestFrameHub:
                 frame_format=frame_format,
                 quality=quality,
             )
-            last_packet = self._last_packet if not max_width and not max_height and frame_format == FRAME_FORMAT_RGBA8 else None
+            last_packet = (
+                self._last_packet
+                if (
+                    not max_width
+                    and not max_height
+                    and frame_format in (FRAME_FORMAT_RGBA8, FRAME_FORMAT_BGRA8)
+                    and self._last_packet_format == frame_format
+                )
+                else None
+            )
             client_count = len(self._clients)
         if last_packet:
             self._replace_latest(queue, last_packet)
@@ -140,12 +171,53 @@ class LatestFrameHub:
             )
             return
 
-        height, width = frame.shape[:2]
-
-        now = time.monotonic()
+        enqueue_start = time.perf_counter()
+        source_now = time.monotonic()
         with self._lock:
+            if not self._clients or self._loop is None:
+                return
             self._seq += 1
             seq = self._seq
+            self._log_source_jitter_locked(source_now, frame.shape[1], frame.shape[0], len(self._clients))
+
+        if not frame.flags["C_CONTIGUOUS"]:
+            frame = np.ascontiguousarray(frame)
+
+        with self._condition:
+            if self._pending_frame is not None:
+                self._pending_drops += 1
+            self._pending_frame = frame
+            self._pending_seq = seq
+            self._condition.notify()
+
+        with self._lock:
+            self._enqueue_ms += (time.perf_counter() - enqueue_start) * 1000
+
+    def _worker_loop(self):
+        while True:
+            with self._condition:
+                while self._pending_frame is None:
+                    self._condition.wait()
+                frame = self._pending_frame
+                seq = self._pending_seq
+                pending_drops = self._pending_drops
+                self._pending_frame = None
+                self._pending_drops = 0
+
+            if pending_drops:
+                with self._lock:
+                    self._dropped_source_frames += pending_drops
+
+            try:
+                self._publish_frame_now(frame, seq)
+            except Exception:
+                logger.exception("alpha frame packetizer exception")
+
+    def _publish_frame_now(self, frame: np.ndarray, seq: int):
+        height, width = frame.shape[:2]
+        now = time.monotonic()
+        with self._lock:
+            self._published_frames += 1
             clients = list(self._clients.values())
             loop = self._loop
             send_clients = []
@@ -165,7 +237,7 @@ class LatestFrameHub:
         if not send_clients or loop is None:
             return
 
-        full_packet = None
+        full_packets: dict[int, bytes] = {}
         for client in send_clients:
             if client.max_width or client.max_height:
                 resize_start = time.perf_counter()
@@ -176,15 +248,17 @@ class LatestFrameHub:
                 self._packet_ms += (time.perf_counter() - packet_start) * 1000
                 self._packet_bytes += len(client_packet)
             else:
-                if client.frame_format == FRAME_FORMAT_RGBA8:
-                    if full_packet is None:
+                if client.frame_format in (FRAME_FORMAT_RGBA8, FRAME_FORMAT_BGRA8):
+                    client_packet = full_packets.get(client.frame_format)
+                    if client_packet is None:
                         packet_start = time.perf_counter()
-                        full_packet = self._make_packet(frame, seq, client.frame_format, client.quality)
+                        client_packet = self._make_packet(frame, seq, client.frame_format, client.quality)
                         self._packet_ms += (time.perf_counter() - packet_start) * 1000
-                        self._packet_bytes += len(full_packet)
+                        self._packet_bytes += len(client_packet)
+                        full_packets[client.frame_format] = client_packet
                         with self._lock:
-                            self._last_packet = full_packet
-                    client_packet = full_packet
+                            self._last_packet = client_packet
+                            self._last_packet_format = client.frame_format
                 else:
                     packet_start = time.perf_counter()
                     client_packet = self._make_packet(frame, seq, client.frame_format, client.quality)
@@ -194,12 +268,38 @@ class LatestFrameHub:
             loop.call_soon_threadsafe(self._replace_latest, client.queue, client_packet)
             self._send_schedule_ms += (time.perf_counter() - schedule_start) * 1000
 
+    def _log_source_jitter_locked(self, now: float, width: int, height: int, client_count: int):
+        if self._last_source_at:
+            delta_ms = (now - self._last_source_at) * 1000
+            if delta_ms > FRAME_JITTER_WARN_MS and now - self._last_jitter_log_at > 1.0:
+                logger.warning(
+                    "alpha frame source jitter interval_ms=%.1f threshold_ms=%.1f seq=%d "
+                    "size=%dx%d clients=%d dropped_source=%d dropped_queue=%d",
+                    delta_ms,
+                    FRAME_JITTER_WARN_MS,
+                    self._seq,
+                    width,
+                    height,
+                    client_count,
+                    self._dropped_source_frames,
+                    self._dropped_packets,
+                )
+                self._last_jitter_log_at = now
+        self._last_source_at = now
+
     def _to_rgba(self, frame: np.ndarray) -> np.ndarray:
         if not frame.flags["C_CONTIGUOUS"]:
             frame = np.ascontiguousarray(frame)
         if frame.shape[2] == 4:
             return cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+
+    def _to_bgra(self, frame: np.ndarray) -> np.ndarray:
+        if not frame.flags["C_CONTIGUOUS"]:
+            frame = np.ascontiguousarray(frame)
+        if frame.shape[2] == 4:
+            return frame
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
 
     def _make_packet(self, frame: np.ndarray, seq: int, frame_format: int, quality: int) -> bytes:
         height, width = frame.shape[:2]
@@ -210,6 +310,13 @@ class LatestFrameHub:
             if not rgba.flags["C_CONTIGUOUS"]:
                 rgba = np.ascontiguousarray(rgba)
             payload = rgba.tobytes()
+        elif frame_format == FRAME_FORMAT_BGRA8:
+            convert_start = time.perf_counter()
+            bgra = self._to_bgra(frame)
+            self._convert_ms += (time.perf_counter() - convert_start) * 1000
+            if not bgra.flags["C_CONTIGUOUS"]:
+                bgra = np.ascontiguousarray(bgra)
+            payload = bgra.tobytes()
         else:
             payload = self._encode_image(frame, frame_format, quality)
         return FRAME_HEADER.pack(
@@ -304,33 +411,42 @@ class LatestFrameHub:
             return
 
         interval = now - self._last_log_time if self._last_log_time else 0.0
-        frame_delta = self._seq - self._last_log_seq
-        fps = frame_delta / interval if interval > 0 else 0.0
+        source_delta = self._seq - self._last_log_seq
+        publish_delta = self._published_frames - self._last_log_published_frames
+        fps = publish_delta / interval if interval > 0 else 0.0
+        source_fps = source_delta / interval if interval > 0 else 0.0
         logger.info(
-            "alpha frame publish seq=%d size=%dx%d dtype=%s clients=%d fps=%.1f queue_drop=%d "
-            "avg_resize_ms=%.2f avg_convert_ms=%.2f avg_packet_ms=%.2f avg_schedule_ms=%.2f avg_packet_mb=%.2f",
+            "alpha frame publish seq=%d size=%dx%d dtype=%s clients=%d fps=%.1f source_fps=%.1f queue_drop=%d "
+            "source_drop=%d avg_enqueue_ms=%.2f avg_resize_ms=%.2f avg_convert_ms=%.2f "
+            "avg_packet_ms=%.2f avg_schedule_ms=%.2f avg_packet_mb=%.2f",
             self._seq,
             width,
             height,
             frame.dtype,
             client_count,
             fps,
+            source_fps,
             self._dropped_packets,
-            self._resize_ms / max(1, frame_delta),
-            self._convert_ms / max(1, frame_delta),
-            self._packet_ms / max(1, frame_delta),
-            self._send_schedule_ms / max(1, frame_delta),
-            (self._packet_bytes / max(1, frame_delta)) / (1024 * 1024),
+            self._dropped_source_frames,
+            self._enqueue_ms / max(1, source_delta),
+            self._resize_ms / max(1, publish_delta),
+            self._convert_ms / max(1, publish_delta),
+            self._packet_ms / max(1, publish_delta),
+            self._send_schedule_ms / max(1, publish_delta),
+            (self._packet_bytes / max(1, publish_delta)) / (1024 * 1024),
         )
         self._last_shape = shape
         self._last_log_time = now
         self._last_log_seq = self._seq
+        self._last_log_published_frames = self._published_frames
         self._dropped_packets = 0
+        self._dropped_source_frames = 0
         self._convert_ms = 0.0
         self._resize_ms = 0.0
         self._packet_ms = 0.0
         self._send_schedule_ms = 0.0
         self._packet_bytes = 0
+        self._enqueue_ms = 0.0
 
 
 class AudioHub:

@@ -131,7 +131,7 @@ Web 高级排障参数按需临时设置即可：
 | `VITE_ALPHA_FORCE_OPAQUE` | `0` | bool：`0/1` | 设 `1` 时忽略 alpha，用于判断黑屏是否来自 alpha 解包。 |
 | `VITE_ALPHA_VIDEO_MAX_HEIGHT` | `0` | int，`0` 或 `>0` | 最大逻辑高度；`0` 表示服务端不额外限制，远程卡顿时可试 `540` 或 `720`。 |
 | `VITE_ALPHA_VIDEO_FPS` | `25` | float，`>0` | 目标预览帧率；远程显示可试 `12-15`。 |
-| `VITE_ALPHA_VIDEO_FORMAT` | `raw` | `raw` / `jpeg` / `png` / `webp` | 仅 `VITE_ALPHA_OUTPUT=ws` 使用。 |
+| `VITE_ALPHA_VIDEO_FORMAT` | `bgra` | `bgra` / `raw` / `jpeg` / `png` / `webp` | 仅 `VITE_ALPHA_OUTPUT=ws` 使用；`bgra` 避免服务端整帧转色。 |
 | `VITE_ALPHA_VIDEO_QUALITY` | `80` | int，`1-100` | 仅 `jpeg/webp` 使用。 |
 
 ## 5. 启动 overlay
@@ -143,10 +143,20 @@ Web 高级排障参数按需临时设置即可：
 远程显示：
 
 ```bash
-LIVETALKING_SERVER=http://<LiveTalking机器IP>:8050 ./start-overlay.sh
+LIVETALKING_SERVER=http://<LiveTalking机器IP>:8050 \
+LIVETALKING_OUTPUT=webrtc-packed \
+./start-overlay.sh
 ```
 
-overlay 链路：
+overlay 默认本机链路：
+
+```text
+WS /alpha/ws
+WS /alpha/audio
+raw BGRA/RGBA video + PCM audio
+```
+
+本机 overlay 默认使用 `ws`，不经过 WebRTC/H264 编码，适合桌面助手叠加显示。远程显示时使用 packed WebRTC：
 
 ```text
 POST /alpha/webrtc/packed_offer
@@ -154,16 +164,14 @@ WebRTC audio track
 WebRTC packed video track，left=color，right=alpha
 ```
 
-`LIVETALKING_OUTPUT=ws` 时才使用旧的 `/alpha/ws` 和 `/alpha/audio`，主要用于本地调试 raw 帧。
-
 overlay 常用配置：
 
 | 变量 | 默认 | 取值/范围 | 说明 |
 | --- | --- | --- | --- |
 | `LIVETALKING_SERVER` | `http://127.0.0.1:8050` | `http/https` URL | overlay 访问 LiveTalking 的地址。 |
 | `LIVETALKING_CLICK_THROUGH` | `1` | bool：`0/1` | 视频窗口是否鼠标穿透；`1` 适合叠在 PPT 上，`0` 便于调试拖动。 |
-| `LIVETALKING_OUTPUT` | `webrtc-packed` | `webrtc-packed` / `ws` | overlay 视频输出链路；默认 packed 单视频轨透明输出。 |
-| `LIVETALKING_PLAY_AUDIO` | `0` | bool：`0/1` | 是否播放 WebRTC 音频轨；通常保持关闭，避免重复声音。 |
+| `LIVETALKING_OUTPUT` | `ws` | `ws` / `webrtc-packed` | overlay 视频输出链路；本机显示用 `ws` 更顺，远程显示用 `webrtc-packed`。 |
+| `LIVETALKING_PLAY_AUDIO` | `0` | bool：`0/1` | 是否播放 LiveTalking 输出音频；通常保持关闭，避免重复声音。 |
 | `LIVETALKING_SCALE` | `1` | float，`>0`，常用 `0.5-2.0` | 初始显示倍率，只影响窗口显示大小，不改变 avatar 推理尺寸。 |
 
 overlay 高级排障参数：
@@ -173,7 +181,7 @@ overlay 高级排障参数：
 | `LIVETALKING_RENDERER` | `webgl` | `webgl` | packed alpha 渲染器。 |
 | `LIVETALKING_VIDEO_MAX_HEIGHT` | `0` | int，`0` 或 `>0` | packed WebRTC 输出最大逻辑高度；`0` 表示不限制。 |
 | `LIVETALKING_VIDEO_FPS` | `0` | float，`0` 或 `>0` | packed WebRTC 目标帧率；`0` 表示使用服务端默认。 |
-| `LIVETALKING_VIDEO_FORMAT` | `raw` | `raw` / `jpeg` / `png` / `webp` | 仅 `LIVETALKING_OUTPUT=ws` 使用。 |
+| `LIVETALKING_VIDEO_FORMAT` | `bgra` | `bgra` / `raw` / `jpeg` / `png` / `webp` | 仅 `LIVETALKING_OUTPUT=ws` 使用；本机 overlay 推荐 `bgra`。 |
 
 ## 6. 多机配置
 
@@ -182,11 +190,11 @@ overlay 高级排障参数：
 | GPU 推理机 | LiveTalking `./entrypoint.sh` | 开放 `8050`。 |
 | TTS 机器 | 真实 robot-tts 或 `./start-tts.sh` | 开放 `8036`。 |
 | 控制端 | 业务服务或 `testclient/web` | 能访问 LiveTalking 和 TTS。 |
-| 显示端 | `testclient/overlay` 或自研显示程序 | 能访问 LiveTalking `/alpha/webrtc/packed_offer`。 |
+| 显示端 | `testclient/overlay` 或自研显示程序 | 本机访问 `/alpha/ws`；远程访问 `/alpha/webrtc/packed_offer`。 |
 
 地址规则：
 
 - `/alpha/speak` 模式：控制端访问 LiveTalking，LiveTalking 访问 TTS。
 - `/tts/task/start` 模式：控制端访问 TTS，TTS 访问 LiveTalking `/alpha/input/audio`。
-- 视频显示：显示端访问 LiveTalking `/alpha/webrtc/packed_offer`，收到单个 packed video track 后在本地 shader 解包透明度。
+- 视频显示：本机 overlay 访问 `/alpha/ws`；远程显示访问 `/alpha/webrtc/packed_offer`，收到单个 packed video track 后在本地 shader 解包透明度。
 - 声音播放：只选择一个组件播放，避免重复声音。

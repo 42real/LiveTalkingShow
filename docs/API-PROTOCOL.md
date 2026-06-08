@@ -286,7 +286,7 @@ WS /alpha/audio
 | `max_width` | `0-4096` | `0` | 当前客户端最大宽度，`0` 不限制。 |
 | `max_height` | `0-4096` | `0` | 当前客户端最大高度，`0` 不限制。 |
 | `fps` | `0-60` | `0` | 当前客户端帧率限制，`0` 不限制。 |
-| `format` / `frame_format` | `raw` / `rgba` / `rgba8` / `jpeg` / `jpg` / `png` / `webp` | `raw` | 视频帧编码。`rgba`、`rgba8` 等价于 `raw`。 |
+| `format` / `frame_format` | `bgra` / `bgra8` / `raw` / `rgba` / `rgba8` / `jpeg` / `jpg` / `png` / `webp` | `raw` | 视频帧编码。`rgba`、`rgba8` 等价于 `raw`；本机 overlay 推荐 `bgra`。 |
 | `quality` | `1-100` | `80` | `jpeg` / `webp` 质量。 |
 
 每条视频 binary message：
@@ -301,7 +301,7 @@ header：
 | --- | --- | --- |
 | `0-3` | `char[4]` | `LTAF` |
 | `4` | `uint8` | version，当前 `1` |
-| `5` | `uint8` | `1=raw RGBA8`，`2=JPEG`，`3=PNG`，`4=WebP` |
+| `5` | `uint8` | `1=raw RGBA8`，`2=JPEG`，`3=PNG`，`4=WebP`，`5=raw BGRA8` |
 | `6-7` | `uint16` | flags，当前 `0` |
 | `8-11` | `uint32` | width |
 | `12-15` | `uint32` | height |
@@ -312,6 +312,7 @@ payload：
 | format | payload |
 | --- | --- |
 | `raw` | `RGBA8`，每像素 `R,G,B,A` 4 字节。 |
+| `bgra` / `bgra8` | `BGRA8`，每像素 `B,G,R,A` 4 字节。 |
 | `jpeg` / `jpg` | JPEG 图片字节，不保留透明。 |
 | `png` | PNG 图片字节，可保留透明。 |
 | `webp` | WebP 图片字节，可保留透明。 |

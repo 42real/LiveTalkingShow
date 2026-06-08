@@ -53,6 +53,7 @@ body.controlbar #toolbar {
   align-items: center;
   justify-content: center;
   pointer-events: none;
+  contain: strict;
 }
 
 #avatar {
@@ -62,6 +63,19 @@ body.controlbar #toolbar {
   display: block;
   user-select: none;
   image-rendering: auto;
+  pointer-events: none;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+.media-decode-sink {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
   pointer-events: none;
 }
 

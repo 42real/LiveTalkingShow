@@ -27,14 +27,17 @@ const closeSessionOnExit = process.env.LIVETALKING_CLOSE_SESSION_ON_EXIT !== '0'
 const videoMaxWidth = envInt('LIVETALKING_VIDEO_MAX_WIDTH', 0);
 const videoMaxHeight = envInt('LIVETALKING_VIDEO_MAX_HEIGHT', 0);
 const videoFps = envFloat('LIVETALKING_VIDEO_FPS', 0);
-const videoFormat = envFormat('LIVETALKING_VIDEO_FORMAT', 'raw');
+const videoFormat = envFormat('LIVETALKING_VIDEO_FORMAT', 'bgra');
 const videoQuality = envInt('LIVETALKING_VIDEO_QUALITY', 80);
-const outputMode = envOutputMode('LIVETALKING_OUTPUT', 'webrtc-packed');
+const outputMode = envOutputMode('LIVETALKING_OUTPUT', 'ws');
 const logFile = path.join(__dirname, 'overlay-debug.log');
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
 app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
 function debugLog(scope, message, data) {
   const record = {
@@ -90,7 +93,7 @@ function envFloat(name, fallback) {
 
 function envFormat(name, fallback) {
   const value = (process.env[name] || '').trim().toLowerCase();
-  return ['raw', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+  return ['raw', 'rgba', 'rgba8', 'bgra', 'bgra8', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
 }
 
 function envOutputMode(name, fallback) {
@@ -133,7 +136,8 @@ function createViewerWindow() {
     webPreferences: {
       preload: `${__dirname}/preload.js`,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 
@@ -203,7 +207,8 @@ function createControlWindow() {
     webPreferences: {
       preload: `${__dirname}/preload.js`,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 

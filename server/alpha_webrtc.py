@@ -110,15 +110,7 @@ class AlphaWebRTCPlayer:
         audio_frame.planes[0].update(frame.tobytes())
         audio_frame.sample_rate = 16000
         self.__audio_count += 1
-        try:
-            self.__audio._queue.put((audio_frame, eventpoint), timeout=0.02)
-        except queue.Full:
-            try:
-                self.__audio._queue.get_nowait()
-                self.__audio._dropped += 1
-            except queue.Empty:
-                pass
-            self.__audio._queue.put((audio_frame, eventpoint))
+        self._put_audio_nowait(audio_frame, eventpoint)
 
     def get_buffer_size(self) -> int:
         return max(
@@ -186,6 +178,33 @@ class AlphaWebRTCPlayer:
             except queue.Empty:
                 break
         target_queue.put((frame, None))
+
+    def _put_audio_nowait(self, frame: AudioFrame, eventpoint=None) -> None:
+        audio_queue = self.__audio._queue
+        self._trim_audio_queue(audio_queue)
+        try:
+            audio_queue.put_nowait((frame, eventpoint))
+            return
+        except queue.Full:
+            self._drop_one_audio(audio_queue)
+        try:
+            audio_queue.put_nowait((frame, eventpoint))
+        except queue.Full:
+            self.__audio._dropped += 1
+
+    def _trim_audio_queue(self, audio_queue: queue.Queue) -> None:
+        # A full audio queue means stale speech and, previously, a 20ms render
+        # thread stall. Keep about 240ms buffered and drop older chunks.
+        max_buffered_chunks = 12
+        while audio_queue.qsize() >= max_buffered_chunks:
+            self._drop_one_audio(audio_queue)
+
+    def _drop_one_audio(self, audio_queue: queue.Queue) -> None:
+        try:
+            audio_queue.get_nowait()
+            self.__audio._dropped += 1
+        except queue.Empty:
+            pass
 
     def _log_video(self, source_frame) -> None:
         now = time.perf_counter()

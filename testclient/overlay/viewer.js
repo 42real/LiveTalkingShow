@@ -12,9 +12,9 @@ let zoomScale = clampScale(readPositiveFloatParam('scale', 1));
 let videoMaxWidth = readNonNegativeIntParam('videoMaxWidth', 0);
 let videoMaxHeight = readNonNegativeIntParam('videoMaxHeight', 0);
 let videoFps = readPositiveFloatParam('videoFps', 0);
-let videoFormat = readFormatParam('videoFormat', 'raw');
+let videoFormat = readFormatParam('videoFormat', 'bgra');
 let videoQuality = readQualityParam('videoQuality', 80);
-let outputMode = readOutputModeParam('output', 'webrtc-packed');
+let outputMode = readOutputModeParam('output', 'ws');
 
 let socket = null;
 let audioSocket = null;
@@ -40,7 +40,15 @@ let frameStats = {
   drawn: 0,
   dropped: 0,
   lastFpsAt: performance.now(),
-  lastDrawn: 0
+  lastDrawn: 0,
+  lastReceiveAt: 0,
+  receiveGapMs: 0,
+  receiveGapCount: 0,
+  maxReceiveGapMs: 0,
+  lastDrawAt: 0,
+  drawGapMs: 0,
+  drawGapCount: 0,
+  maxDrawGapMs: 0
 };
 let lastWindowRequest = {
   width: 0,
@@ -53,6 +61,7 @@ let lastSourceFrame = {
 };
 let lastFrameSignature = '';
 let firstFrameLogged = false;
+let lastPackedMediaTime = -1;
 
 function log(message, data) {
   window.overlayApi?.log?.('viewer', message, data);
@@ -70,7 +79,7 @@ function readNonNegativeIntParam(name, fallback) {
 
 function readFormatParam(name, fallback) {
   const value = (urlParams.get(name) || '').trim().toLowerCase();
-  return ['raw', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+  return ['raw', 'rgba', 'rgba8', 'bgra', 'bgra8', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
 }
 
 function readOutputModeParam(name, fallback) {
@@ -168,6 +177,7 @@ function connectAlphaWebSocket() {
   };
   socket.onmessage = (event) => {
     frameStats.received++;
+    recordReceiveGap();
     if (pendingFrame) frameStats.dropped++;
     pendingFrame = event.data;
     scheduleDraw();
@@ -306,14 +316,16 @@ function attachPackedVideoTrack(track) {
   packedVideoElement.autoplay = true;
   packedVideoElement.playsInline = true;
   packedVideoElement.muted = true;
-  packedVideoElement.style.display = 'none';
+  packedVideoElement.disablePictureInPicture = true;
+  packedVideoElement.className = 'media-decode-sink';
   packedVideoElement.srcObject = new MediaStream([track]);
   document.body.appendChild(packedVideoElement);
   packedVideoElement.addEventListener('loadedmetadata', () => {
     log('packed video metadata', {
       packedWidth: packedVideoElement.videoWidth,
       height: packedVideoElement.videoHeight,
-      logicalWidth: Math.floor((packedVideoElement.videoWidth || 0) / 2)
+      logicalWidth: Math.floor((packedVideoElement.videoWidth || 0) / 2),
+      readyState: packedVideoElement.readyState
     });
     startPackedRenderLoop();
   });
@@ -376,9 +388,12 @@ function schedulePackedRenderFrame() {
     typeof packedVideoElement.requestVideoFrameCallback === 'function'
   ) {
     packedRenderHandleType = 'videoFrame';
-    packedRenderHandle = packedVideoElement.requestVideoFrameCallback(() => {
+    packedRenderHandle = packedVideoElement.requestVideoFrameCallback((_now, metadata = {}) => {
       packedRenderHandle = null;
-      drawPackedVideoFrame();
+      if (typeof metadata.mediaTime !== 'number' || metadata.mediaTime !== lastPackedMediaTime) {
+        lastPackedMediaTime = metadata.mediaTime;
+        drawPackedVideoFrame(metadata);
+      }
       schedulePackedRenderFrame();
     });
     return;
@@ -392,7 +407,7 @@ function schedulePackedRenderFrame() {
   });
 }
 
-function drawPackedVideoFrame() {
+function drawPackedVideoFrame(metadata = {}) {
   const video = packedVideoElement;
   if (!video || video.readyState < 2) return;
 
@@ -420,7 +435,8 @@ function drawPackedVideoFrame() {
   }
   frameStats.received++;
   frameStats.drawn++;
-  updateFpsStatus();
+  recordDrawGap();
+  updateFpsStatus(metadata);
 }
 
 async function ensureAlphaSession() {
@@ -571,6 +587,10 @@ function stopAudioSocket() {
 function scheduleDraw() {
   if (drawing) return;
   drawing = true;
+  if (outputMode === 'ws') {
+    queueMicrotask(drawLatestFrame);
+    return;
+  }
   requestAnimationFrame(drawLatestFrame);
 }
 
@@ -597,7 +617,8 @@ async function drawLatestFrame() {
     log('frame size', {
       width: parsed.width,
       height: parsed.height,
-      byteLength: packet.byteLength
+      byteLength: packet.byteLength,
+      format: parsed.formatName
     });
   }
 
@@ -613,6 +634,7 @@ async function drawLatestFrame() {
     return;
   }
   frameStats.drawn++;
+  recordDrawGap();
   updateFpsStatus();
 
   drawing = false;
@@ -678,7 +700,7 @@ function parseFrame(packet) {
     return null;
   }
 
-  if (format === 1) {
+  if (format === 1 || format === 5) {
     const expected = 24 + width * height * 4;
     if (packet.byteLength !== expected) {
       log('invalid frame payload length', { expected, actual: packet.byteLength, width, height });
@@ -688,6 +710,8 @@ function parseFrame(packet) {
       width,
       height,
       format,
+      formatName: format === 5 ? 'bgra' : 'rgba',
+      bgra: format === 5,
       rgba: new Uint8Array(packet, 24)
     };
   }
@@ -696,6 +720,7 @@ function parseFrame(packet) {
       width,
       height,
       format,
+      formatName: format === 2 ? 'jpeg' : format === 3 ? 'png' : 'webp',
       encoded: new Uint8Array(packet, 24)
     };
   }
@@ -732,9 +757,11 @@ function createFrameRenderer(canvas) {
     `
       precision mediump float;
       uniform sampler2D uTexture;
+      uniform bool uBgra;
       varying vec2 vTexCoord;
       void main() {
-        gl_FragColor = texture2D(uTexture, vTexCoord);
+        vec4 color = texture2D(uTexture, vTexCoord);
+        gl_FragColor = uBgra ? vec4(color.b, color.g, color.r, color.a) : color;
       }
     `
   );
@@ -768,6 +795,7 @@ function createFrameRenderer(canvas) {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.useProgram(program);
   gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
+  const bgraUniform = gl.getUniformLocation(program, 'uBgra');
   gl.disable(gl.BLEND);
 
   let textureWidth = 0;
@@ -776,7 +804,7 @@ function createFrameRenderer(canvas) {
 
   return {
     async draw(frame) {
-      if (frame.format !== 1) {
+      if (frame.format !== 1 && frame.format !== 5) {
         await drawEncodedFrame(canvas, frame);
         return;
       }
@@ -800,6 +828,7 @@ function createFrameRenderer(canvas) {
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(bgraUniform, frame.bgra ? 1 : 0);
       if (textureWidth !== frame.width || textureHeight !== frame.height) {
         textureWidth = frame.width;
         textureHeight = frame.height;
@@ -842,6 +871,10 @@ function createCanvas2dRenderer(canvas) {
     async draw(frame) {
       resizeCanvasToDisplaySize(canvas, frame.width, frame.height);
       if (frame.format !== 1) {
+        if (frame.format === 5) {
+          drawRawBgra2d(frame);
+          return;
+        }
         await drawEncodedFrame(canvas, frame);
         return;
       }
@@ -862,6 +895,32 @@ function createCanvas2dRenderer(canvas) {
       ctx.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
     }
   };
+
+  function drawRawBgra2d(frame) {
+    resizeCanvasToDisplaySize(canvas, frame.width, frame.height);
+    if (sourceCanvas.width !== frame.width || sourceCanvas.height !== frame.height) {
+      sourceCanvas.width = frame.width;
+      sourceCanvas.height = frame.height;
+    }
+    sourceCtx.putImageData(
+      new ImageData(bgraToRgba(frame.rgba), frame.width, frame.height),
+      0,
+      0
+    );
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
+  }
+}
+
+function bgraToRgba(bgra) {
+  const rgba = new Uint8ClampedArray(bgra.byteLength);
+  for (let i = 0; i < bgra.byteLength; i += 4) {
+    rgba[i] = bgra[i + 2];
+    rgba[i + 1] = bgra[i + 1];
+    rgba[i + 2] = bgra[i];
+    rgba[i + 3] = bgra[i + 3];
+  }
+  return rgba;
 }
 
 function createPackedWebRTCRenderer(canvas) {
@@ -1017,20 +1076,71 @@ function createShader(gl, type, source) {
   return shader;
 }
 
-function updateFpsStatus() {
+function updateFpsStatus(metadata = {}) {
   const now = performance.now();
   if (now - frameStats.lastFpsAt < 1000) return;
   const fps = (frameStats.drawn - frameStats.lastDrawn) * 1000 / (now - frameStats.lastFpsAt);
   frameStats.lastDrawn = frameStats.drawn;
   frameStats.lastFpsAt = now;
   console.debug(`${outputMode} alpha ${fps.toFixed(1)} fps, dropped ${frameStats.dropped}`);
+  const playbackQuality = packedVideoElement && typeof packedVideoElement.getVideoPlaybackQuality === 'function'
+    ? packedVideoElement.getVideoPlaybackQuality()
+    : null;
   log('fps', {
     outputMode,
     fps: Number(fps.toFixed(1)),
     received: frameStats.received,
     drawn: frameStats.drawn,
-    dropped: frameStats.dropped
+    dropped: frameStats.dropped,
+    avgReceiveGapMs: frameStats.receiveGapCount
+      ? Number((frameStats.receiveGapMs / frameStats.receiveGapCount).toFixed(1))
+      : undefined,
+    maxReceiveGapMs: frameStats.maxReceiveGapMs ? Number(frameStats.maxReceiveGapMs.toFixed(1)) : undefined,
+    avgDrawGapMs: frameStats.drawGapCount
+      ? Number((frameStats.drawGapMs / frameStats.drawGapCount).toFixed(1))
+      : undefined,
+    maxDrawGapMs: frameStats.maxDrawGapMs ? Number(frameStats.maxDrawGapMs.toFixed(1)) : undefined,
+    mediaTime: typeof metadata.mediaTime === 'number' ? Number(metadata.mediaTime.toFixed(3)) : undefined,
+    presentedFrames: metadata.presentedFrames,
+    processingMs: typeof metadata.processingDuration === 'number'
+      ? Number((metadata.processingDuration * 1000).toFixed(2))
+      : undefined,
+    totalVideoFrames: playbackQuality ? playbackQuality.totalVideoFrames : undefined,
+    droppedVideoFrames: playbackQuality ? playbackQuality.droppedVideoFrames : undefined,
+    corruptedVideoFrames: playbackQuality ? playbackQuality.corruptedVideoFrames : undefined,
+    readyState: packedVideoElement ? packedVideoElement.readyState : undefined,
+    paused: packedVideoElement ? packedVideoElement.paused : undefined
   });
+  frameStats.receiveGapMs = 0;
+  frameStats.receiveGapCount = 0;
+  frameStats.maxReceiveGapMs = 0;
+  frameStats.drawGapMs = 0;
+  frameStats.drawGapCount = 0;
+  frameStats.maxDrawGapMs = 0;
+}
+
+function recordReceiveGap() {
+  const now = performance.now();
+  if (frameStats.lastReceiveAt > 0) {
+    const gap = now - frameStats.lastReceiveAt;
+    frameStats.receiveGapMs += gap;
+    frameStats.receiveGapCount++;
+    frameStats.maxReceiveGapMs = Math.max(frameStats.maxReceiveGapMs, gap);
+    if (gap > 80) log('video receive jitter', { gapMs: Number(gap.toFixed(1)), outputMode });
+  }
+  frameStats.lastReceiveAt = now;
+}
+
+function recordDrawGap() {
+  const now = performance.now();
+  if (frameStats.lastDrawAt > 0) {
+    const gap = now - frameStats.lastDrawAt;
+    frameStats.drawGapMs += gap;
+    frameStats.drawGapCount++;
+    frameStats.maxDrawGapMs = Math.max(frameStats.maxDrawGapMs, gap);
+    if (gap > 80) log('video draw jitter', { gapMs: Number(gap.toFixed(1)), outputMode });
+  }
+  frameStats.lastDrawAt = now;
 }
 
 function applyServer(server) {
