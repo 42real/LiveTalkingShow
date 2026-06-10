@@ -119,7 +119,7 @@ Web 常用配置：
 | `VITE_ALPHA_OUTPUT` | `webrtc-packed` | `webrtc-packed` / `ws` | Web 视频输出链路；`webrtc-packed` 走 `/alpha/webrtc/packed_offer`，`ws` 走旧 `/alpha/ws` 调试预览。 |
 | `VITE_ALPHA_PLAY_AUDIO` | `0` | bool：`0/1` | Web 是否播放 LiveTalking 输出音频；只开一个播放端，避免重复声音。 |
 
-改 `VITE_*` 后要重启 `./start-web.sh`。
+改 `TEST_CLIENT_*` 或 `VITE_*` 后要重启 `./start-web.sh`。如果直接进入 `testclient/web` 运行 `npm run start`，Vite 也会读取 `testclient/web/.env` 中的 `TEST_CLIENT_HOST`、`TEST_CLIENT_PORT`。
 
 远程浏览器访问时，`VITE_LIVETALKING_URL`、`VITE_TTS_SERVER_URL`、`VITE_ALPHA_INPUT_WS` 都要写成浏览器所在机器能访问到的地址。比如通过 VS Code 端口转发到本机，就继续用 `127.0.0.1:8050`；如果直接访问服务器 IP，就写 `http://<服务器IP>:8050` 和 `ws://<服务器IP>:8050/alpha/input/audio`。
 
@@ -127,10 +127,10 @@ Web 高级排障参数按需临时设置即可：
 
 | 变量 | 默认 | 取值/范围 | 说明 |
 | --- | --- | --- | --- |
-| `VITE_ALPHA_RENDERER` | `2d` | `2d` / `webgl` | packed WebRTC 浏览器渲染器；`2d` 更稳，`webgl` 可用于本机性能对比。 |
+| `VITE_ALPHA_RENDERER` | `webgl` | `webgl` / `2d` | packed WebRTC 浏览器渲染器；`webgl` 性能更好，失败时页面会自动回退到 `2d`。 |
 | `VITE_ALPHA_FORCE_OPAQUE` | `0` | bool：`0/1` | 设 `1` 时忽略 alpha，用于判断黑屏是否来自 alpha 解包。 |
 | `VITE_ALPHA_VIDEO_MAX_HEIGHT` | `0` | int，`0` 或 `>0` | 最大逻辑高度；`0` 表示服务端不额外限制，远程卡顿时可试 `540` 或 `720`。 |
-| `VITE_ALPHA_VIDEO_FPS` | `25` | float，`>0` | 目标预览帧率；远程显示可试 `12-15`。 |
+| `VITE_ALPHA_VIDEO_FPS` | `0` | float，`0` 或 `>0` | 目标预览帧率；`0` 表示使用 avatar 原始输出节奏。远程带宽不足时可试 `12-15`。 |
 | `VITE_ALPHA_VIDEO_FORMAT` | `bgra` | `bgra` / `raw` / `jpeg` / `png` / `webp` | 仅 `VITE_ALPHA_OUTPUT=ws` 使用；`bgra` 避免服务端整帧转色。 |
 | `VITE_ALPHA_VIDEO_QUALITY` | `80` | int，`1-100` | 仅 `jpeg/webp` 使用。 |
 

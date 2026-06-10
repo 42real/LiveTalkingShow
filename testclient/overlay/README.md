@@ -10,7 +10,9 @@ cd /path/to/LiveTalking/testclient
 远程显示：
 
 ```bash
-LIVETALKING_SERVER=http://<LiveTalking机器IP>:8050 ./start-overlay.sh
+LIVETALKING_SERVER=http://<LiveTalking机器IP>:8050 \
+LIVETALKING_OUTPUT=webrtc-packed \
+./start-overlay.sh
 ```
 
 窗口行为、视频参数和多机配置见 [../README.md](../README.md)。

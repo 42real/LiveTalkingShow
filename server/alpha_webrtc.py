@@ -268,20 +268,29 @@ class PackedAlphaWebRTCPlayer(AlphaWebRTCPlayer):
         params = params or {}
         self.__target_max_width = self.__read_positive_int(params.get("max_width"))
         self.__target_max_height = self.__read_positive_int(params.get("max_height"))
-        self.__target_fps = self.__read_positive_int(params.get("fps"))
-        video_ptime = 1.0 / self.__target_fps if self.__target_fps else 0.040
+        self.__source_fps = max(1, int(getattr(getattr(avatar_session, "opt", None), "fps", 25) or 25))
+        self.__requested_fps = self.__read_positive_int(params.get("fps"))
+        self.__target_fps = (
+            self.__requested_fps
+            if self.__requested_fps and self.__requested_fps < self.__source_fps
+            else None
+        )
+        video_ptime = 1.0 / (self.__target_fps or self.__source_fps)
         self.__packed_video = PlayerStreamTrack(self, kind="video", video_ptime=video_ptime)
         self.__video_count = 0
         self.__last_log = 0.0
         self.__pack_ms = 0.0
         self.__next_push_at: Optional[float] = None
         self.__dropped_video = 0
-        if self.__target_max_width or self.__target_max_height or self.__target_fps:
+        if self.__target_max_width or self.__target_max_height or self.__requested_fps:
             logger.info(
-                "packed alpha webrtc constraints max_width=%s max_height=%s fps=%s",
+                "packed alpha webrtc constraints max_width=%s max_height=%s requested_fps=%s "
+                "effective_fps=%s source_fps=%s",
                 self.__target_max_width or 0,
                 self.__target_max_height or 0,
-                self.__target_fps or 0,
+                self.__requested_fps or 0,
+                self.__target_fps or self.__source_fps,
+                self.__source_fps,
             )
 
     @property

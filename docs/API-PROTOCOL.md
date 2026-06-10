@@ -461,13 +461,20 @@ POST 也可以使用独立字段：
 
 动作素材接口用于把一段源视频切成可复用的说话动作或静息动作。新版 avatar-local 格式会把动作和配置都放在 `data/avatars/<avatar_id>/` 下：
 
+avatar 支持两种格式：
+
+| 格式 | 识别方式 | 动作素材位置 |
+| --- | --- | --- |
+| 基础格式 | `data/avatars/<avatar_id>/` 下没有 `motion.json` | 兼容旧外置目录 `data/speaking_actions/<avatar_id>/<action_id>`、`data/idle_actions/<avatar_id>/<action_id>`。 |
+| avatar-local 动作格式 | `data/avatars/<avatar_id>/` 下存在 `motion.json` | `data/avatars/<avatar_id>/motions/speaking/<action_id>`、`data/avatars/<avatar_id>/motions/idle/<action_id>`。 |
+
 ```text
 data/avatars/<avatar_id>/motion.json
 data/avatars/<avatar_id>/motions/speaking/<action_id>/
 data/avatars/<avatar_id>/motions/idle/<action_id>/
 ```
 
-没有 `motion.json` 的旧 avatar 会继续按原有方式运行，并兼容旧外置目录 `data/speaking_actions/<avatar_id>/<action_id>`、`data/idle_actions/<avatar_id>/<action_id>`。
+每个动作目录本身也是一套基础 avatar 片段，至少包含 `full_imgs/`、`face_imgs/`、`coords.pkl`。
 
 安全限制：
 
@@ -726,7 +733,7 @@ Content-Type: application/json
 }
 ```
 
-`max_width`、`max_height`、`fps` 只对 packed alpha WebRTC 生效，用来降低远程透明显示的编码和网络压力。`0` 或不传表示不限制。
+`max_width`、`max_height`、`fps` 只对 packed alpha WebRTC 生效，用来降低远程透明显示的编码和网络压力。`0` 或不传表示不限制。`fps` 只有低于 avatar 原始 FPS 时才会抽帧，等于或高于原始 FPS 会按原始节奏输出。
 
 返回：
 

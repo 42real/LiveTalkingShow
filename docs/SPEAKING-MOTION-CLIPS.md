@@ -119,6 +119,100 @@ data/idle_actions/<avatar_id>/<action_id>/
 
 基础版本按“动作边界”切换素材。音频一来会立即做嘴型推理，不等当前动作结束；但身体动作素材不会立刻硬切。如果当前素材设置了 `switch_at_boundary=true`，系统会等当前原子动作播放完成后，再切到音频目标状态对应的素材池。
 
+## 制作带多动作的 avatar-local avatar
+
+avatar-local 动作格式用于制作“一个数字人有多段讲话动作和多段待机动作”的 avatar。一个 avatar 目录里既有基础帧，也有 `speaking` 和 `idle` 多段动作素材。
+
+最小目录长这样：
+
+```text
+data/avatars/<avatar_id>/
+  full_imgs/ face_imgs/ coords.pkl metadata.json
+  motion.json
+  motions/
+    speaking/<action_id>/full_imgs/ face_imgs/ coords.pkl metadata.json
+    idle/<action_id>/full_imgs/ face_imgs/ coords.pkl metadata.json
+```
+
+需要准备四类东西：
+
+- 基础人物素材：一张图、PNG 序列或视频，用来生成顶层 `full_imgs`、`face_imgs`、`coords.pkl`，也是没有动作素材时的兜底画面。
+- 讲话动作素材：多段 `speaking` 视频，每段只做一个原子动作。音频来时，Wav2Lip 会在这些帧上重新推嘴型。
+- 待机动作素材：多段 `idle` 视频，没有音频时直接播放，不做嘴型推理。
+- 模型和工具：`models/wav2lip.pth`、S3FD 人脸检测模型；长视频切片建议有 FFmpeg。
+
+素材要求保持简单：同一个 avatar 的基础素材、讲话素材、待机素材尽量同人物、同分辨率、同构图；每段动作建议 1-4 秒；首尾回到接近的自然姿态；人脸不要大幅侧转或被遮挡。
+
+制作步骤：
+
+1. 准备模型。
+
+```bash
+cd /path/to/LiveTalking
+HF_ENDPOINT=https://hf-mirror.com ./scripts/download-models.sh wav2lip
+./scripts/download-models.sh s3fd
+```
+
+2. 先生成基础 avatar。
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com uv run --python .venv/bin/python python -m avatars.wav2lip.genavatar \
+  --video_path /path/to/base_or_idle01.mp4 \
+  --img_size 256 \
+  --avatar_id my_motion_avatar \
+  --pads 0 10 0 0 \
+  --face_det_batch_size 8
+```
+
+3. 用 manifest 批量加入动作素材。
+
+这里的 `manifest` 是一个 YAML 清单文件，用来告诉制作脚本：要给哪个 avatar 加动作、默认参数是什么、每个动作视频分别是什么状态和编号。它不是模型文件，也不是运行时必须加载的文件；它只在批量制作动作素材时使用。
+
+```yaml
+avatar_id: my_motion_avatar
+layout: avatar-local
+
+defaults:
+  fps: 25
+  img_size: 256
+  pads: [0, 10, 0, 0]
+  face_det_batch_size: 8
+  use_ffmpeg_cut: true
+  switch_at_boundary: true
+
+clips:
+  - kind: speaking
+    source: /path/to/talk01.mp4
+    action_id: talk01
+    play_mode: forward
+    weight: 3
+
+  - kind: idle
+    source: /path/to/idle01.mp4
+    action_id: idle01
+    play_mode: forward
+    weight: 3
+```
+
+执行：
+
+```bash
+uv run --python .venv/bin/python python tools/build_motion_clips.py \
+  --manifest /path/to/motion-clips.yaml
+```
+
+`clips` 里继续追加视频，就能得到 `talk02`、`talk03`、`idle02` 等更多动作。工具会自动维护 `motion.json`，并把素材写到 `motions/speaking/` 或 `motions/idle/`。
+
+运行和检查：
+
+```bash
+AVATAR_ID=my_motion_avatar ./entrypoint.sh
+curl "http://127.0.0.1:8050/motion/clips?kind=speaking&reload=1"
+curl "http://127.0.0.1:8050/motion/clips?kind=idle&reload=1"
+```
+
+启动日志应能看到 `loaded speaking motion clips`、`loaded idle motion clips`、`loaded avatar motion config`。也可以用测试客户端动作页制作或检查素材：`http://127.0.0.1:8070/motion.html`。
+
 ## 单个素材制作
 
 从视频制作说话动作：
