@@ -64,6 +64,8 @@ class AlphaWebRTCPlayer:
     def start(self) -> None:
         if not self.__manage_worker:
             return
+        if self.__container is None:
+            return
         if self.__thread is None:
             logger.info("alpha webrtc player starting render worker")
             self.__thread_quit = threading.Event()
@@ -108,15 +110,7 @@ class AlphaWebRTCPlayer:
         audio_frame.planes[0].update(frame.tobytes())
         audio_frame.sample_rate = 16000
         self.__audio_count += 1
-        try:
-            self.__audio._queue.put((audio_frame, eventpoint), timeout=0.02)
-        except queue.Full:
-            try:
-                self.__audio._queue.get_nowait()
-                self.__audio._dropped += 1
-            except queue.Empty:
-                pass
-            self.__audio._queue.put((audio_frame, eventpoint))
+        self._put_audio_nowait(audio_frame, eventpoint)
 
     def get_buffer_size(self) -> int:
         return max(
@@ -129,6 +123,8 @@ class AlphaWebRTCPlayer:
             self.__container.notify(eventpoint)
 
     def _start(self, track: PlayerStreamTrack) -> None:
+        if self.__container is None:
+            return
         self.__started.add(track)
         self.start()
 
@@ -183,6 +179,33 @@ class AlphaWebRTCPlayer:
                 break
         target_queue.put((frame, None))
 
+    def _put_audio_nowait(self, frame: AudioFrame, eventpoint=None) -> None:
+        audio_queue = self.__audio._queue
+        self._trim_audio_queue(audio_queue)
+        try:
+            audio_queue.put_nowait((frame, eventpoint))
+            return
+        except queue.Full:
+            self._drop_one_audio(audio_queue)
+        try:
+            audio_queue.put_nowait((frame, eventpoint))
+        except queue.Full:
+            self.__audio._dropped += 1
+
+    def _trim_audio_queue(self, audio_queue: queue.Queue) -> None:
+        # A full audio queue means stale speech and, previously, a 20ms render
+        # thread stall. Keep about 240ms buffered and drop older chunks.
+        max_buffered_chunks = 12
+        while audio_queue.qsize() >= max_buffered_chunks:
+            self._drop_one_audio(audio_queue)
+
+    def _drop_one_audio(self, audio_queue: queue.Queue) -> None:
+        try:
+            audio_queue.get_nowait()
+            self.__audio._dropped += 1
+        except queue.Empty:
+            pass
+
     def _log_video(self, source_frame) -> None:
         now = time.perf_counter()
         if self.__video_count != 1 and now - self.__last_log < 5.0:
@@ -230,7 +253,7 @@ class AlphaWebRTCPlayer:
 
 
 class PackedAlphaWebRTCPlayer(AlphaWebRTCPlayer):
-    """Two-track WebRTC player with color and alpha packed into one video frame.
+    """Single-video-track WebRTC player with color and alpha packed together.
 
     The output video frame is width * 2:
     - left half: BGR color image
@@ -240,21 +263,49 @@ class PackedAlphaWebRTCPlayer(AlphaWebRTCPlayer):
     browsers because both halves are decoded from the same RTP frame.
     """
 
-    def __init__(self, avatar_session, manage_worker: bool = True):
+    def __init__(self, avatar_session, manage_worker: bool = True, params: Optional[dict] = None):
         super().__init__(avatar_session, manage_worker=manage_worker)
-        self.__packed_video = PlayerStreamTrack(self, kind="video")
+        params = params or {}
+        self.__target_max_width = self.__read_positive_int(params.get("max_width"))
+        self.__target_max_height = self.__read_positive_int(params.get("max_height"))
+        self.__source_fps = max(1, int(getattr(getattr(avatar_session, "opt", None), "fps", 25) or 25))
+        self.__requested_fps = self.__read_positive_int(params.get("fps"))
+        self.__target_fps = (
+            self.__requested_fps
+            if self.__requested_fps and self.__requested_fps < self.__source_fps
+            else None
+        )
+        video_ptime = 1.0 / (self.__target_fps or self.__source_fps)
+        self.__packed_video = PlayerStreamTrack(self, kind="video", video_ptime=video_ptime)
         self.__video_count = 0
         self.__last_log = 0.0
         self.__pack_ms = 0.0
+        self.__next_push_at: Optional[float] = None
+        self.__dropped_video = 0
+        if self.__target_max_width or self.__target_max_height or self.__requested_fps:
+            logger.info(
+                "packed alpha webrtc constraints max_width=%s max_height=%s requested_fps=%s "
+                "effective_fps=%s source_fps=%s",
+                self.__target_max_width or 0,
+                self.__target_max_height or 0,
+                self.__requested_fps or 0,
+                self.__target_fps or self.__source_fps,
+                self.__source_fps,
+            )
 
     @property
     def packed_video(self) -> MediaStreamTrack:
         return self.__packed_video
 
     def push_video(self, frame) -> None:
-        self._pace_video()
+        if self.__should_drop_for_fps():
+            self.__dropped_video += 1
+            return
+        if not self.__target_fps:
+            self._pace_video()
         start = time.perf_counter()
         color_frame, alpha_frame = self._split_frame(frame)
+        color_frame, alpha_frame = self.__resize_pair(color_frame, alpha_frame)
         packed_frame = np.concatenate((color_frame, alpha_frame), axis=1)
         if not packed_frame.flags["C_CONTIGUOUS"]:
             packed_frame = np.ascontiguousarray(packed_frame)
@@ -270,20 +321,65 @@ class PackedAlphaWebRTCPlayer(AlphaWebRTCPlayer):
 
     def _log_packed_video(self, source_frame, packed_frame) -> None:
         now = time.perf_counter()
-        if self.__video_count != 1 and now - self.__last_log < 5.0:
+        if self.__last_log and now - self.__last_log < 5.0:
             return
         interval = now - self.__last_log if self.__last_log else 0.0
         fps = 0.0 if interval <= 0 else self.__video_count / interval
         logger.info(
             "packed alpha webrtc video frames=%d approx_fps=%.1f source_shape=%s "
-            "packed_shape=%s queue=%d avg_pack_ms=%.2f",
+            "packed_shape=%s queue=%d avg_pack_ms=%.2f dropped=%d",
             self.__video_count,
             fps,
             getattr(source_frame, "shape", None),
             getattr(packed_frame, "shape", None),
             self.__packed_video._queue.qsize(),
             self.__pack_ms / max(1, self.__video_count),
+            self.__dropped_video,
         )
         self.__video_count = 0
+        self.__dropped_video = 0
         self.__pack_ms = 0.0
         self.__last_log = now
+
+    @staticmethod
+    def __read_positive_int(value) -> Optional[int]:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def __should_drop_for_fps(self) -> bool:
+        if not self.__target_fps:
+            return False
+        now = time.perf_counter()
+        interval = 1.0 / max(1, self.__target_fps)
+        if self.__next_push_at is None:
+            self.__next_push_at = now + interval
+            return False
+        if now < self.__next_push_at:
+            return True
+        if now - self.__next_push_at > interval:
+            self.__next_push_at = now
+        self.__next_push_at += interval
+        return False
+
+    def __resize_pair(self, color_frame: np.ndarray, alpha_frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        height, width = color_frame.shape[:2]
+        scale = 1.0
+        if self.__target_max_width and width > self.__target_max_width:
+            scale = min(scale, self.__target_max_width / width)
+        if self.__target_max_height and height > self.__target_max_height:
+            scale = min(scale, self.__target_max_height / height)
+        if scale >= 1.0:
+            return color_frame, alpha_frame
+
+        target_width = max(1, int(round(width * scale)))
+        target_height = max(1, int(round(height * scale)))
+        color_frame = cv2.resize(color_frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+        alpha_frame = cv2.resize(alpha_frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+        if not color_frame.flags["C_CONTIGUOUS"]:
+            color_frame = np.ascontiguousarray(color_frame)
+        if not alpha_frame.flags["C_CONTIGUOUS"]:
+            alpha_frame = np.ascontiguousarray(alpha_frame)
+        return color_frame, alpha_frame

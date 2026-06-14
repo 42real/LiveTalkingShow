@@ -27,9 +27,17 @@ const closeSessionOnExit = process.env.LIVETALKING_CLOSE_SESSION_ON_EXIT !== '0'
 const videoMaxWidth = envInt('LIVETALKING_VIDEO_MAX_WIDTH', 0);
 const videoMaxHeight = envInt('LIVETALKING_VIDEO_MAX_HEIGHT', 0);
 const videoFps = envFloat('LIVETALKING_VIDEO_FPS', 0);
-const videoFormat = envFormat('LIVETALKING_VIDEO_FORMAT', 'raw');
+const videoFormat = envFormat('LIVETALKING_VIDEO_FORMAT', 'bgra');
 const videoQuality = envInt('LIVETALKING_VIDEO_QUALITY', 80);
+const outputMode = envOutputMode('LIVETALKING_OUTPUT', 'ws');
 const logFile = path.join(__dirname, 'overlay-debug.log');
+
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
 function debugLog(scope, message, data) {
   const record = {
@@ -85,7 +93,14 @@ function envFloat(name, fallback) {
 
 function envFormat(name, fallback) {
   const value = (process.env[name] || '').trim().toLowerCase();
-  return ['raw', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+  return ['raw', 'rgba', 'rgba8', 'bgra', 'bgra8', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+}
+
+function envOutputMode(name, fallback) {
+  const value = (process.env[name] || '').trim().toLowerCase();
+  if (['webrtc-packed', 'packed-webrtc', 'packed', 'webrtc'].includes(value)) return 'webrtc-packed';
+  if (['ws', 'websocket', 'raw'].includes(value)) return 'ws';
+  return fallback;
 }
 
 function createViewerWindow() {
@@ -104,7 +119,8 @@ function createViewerWindow() {
     videoMaxHeight,
     videoFps,
     videoFormat,
-    videoQuality
+    videoQuality,
+    outputMode
   });
 
   viewerWindow = new BrowserWindow({
@@ -120,7 +136,8 @@ function createViewerWindow() {
     webPreferences: {
       preload: `${__dirname}/preload.js`,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 
@@ -147,7 +164,8 @@ function createViewerWindow() {
     videoMaxHeight: String(videoMaxHeight),
     videoFps: String(videoFps),
     videoFormat,
-    videoQuality: String(videoQuality)
+    videoQuality: String(videoQuality),
+    output: outputMode
   });
   viewerWindow.loadFile('viewer.html', { search: `?${params.toString()}` });
 
@@ -189,7 +207,8 @@ function createControlWindow() {
     webPreferences: {
       preload: `${__dirname}/preload.js`,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 
@@ -419,6 +438,7 @@ app.whenReady().then(() => {
       LIVETALKING_PLAY_AUDIO: process.env.LIVETALKING_PLAY_AUDIO,
       LIVETALKING_SCALE: process.env.LIVETALKING_SCALE,
       LIVETALKING_RENDERER: process.env.LIVETALKING_RENDERER,
+      LIVETALKING_OUTPUT: process.env.LIVETALKING_OUTPUT,
       LIVETALKING_VIDEO_FORMAT: process.env.LIVETALKING_VIDEO_FORMAT,
       LIVETALKING_VIDEO_QUALITY: process.env.LIVETALKING_VIDEO_QUALITY
     }

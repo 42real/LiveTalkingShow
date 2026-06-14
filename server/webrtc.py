@@ -51,10 +51,11 @@ class PlayerStreamTrack(MediaStreamTrack):
     A video track that returns an animated flag.
     """
 
-    def __init__(self, player, kind):
+    def __init__(self, player, kind, video_ptime: float = VIDEO_PTIME):
         super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
+        self._video_ptime = video_ptime if video_ptime > 0 else VIDEO_PTIME
         queue_size = 2 if kind == "video" else 100
         self._queue = queue.Queue(maxsize=queue_size)
         self._dropped = 0
@@ -75,9 +76,9 @@ class PlayerStreamTrack(MediaStreamTrack):
         if self.kind == 'video':
             if hasattr(self, "_timestamp"):
                 #self._timestamp = (time.time()-self._start) * VIDEO_CLOCK_RATE
-                self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
+                self._timestamp += int(self._video_ptime * VIDEO_CLOCK_RATE)
                 self.current_frame_count += 1
-                wait = self._start + self.current_frame_count * VIDEO_PTIME - time.time()
+                wait = self._start + self.current_frame_count * self._video_ptime - time.time()
                 # wait = self.timelist[0] + len(self.timelist)*VIDEO_PTIME - time.time()               
                 if wait>0:
                     await asyncio.sleep(wait)
@@ -241,15 +242,33 @@ class HumanPlayer:
         new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
         new_frame.planes[0].update(frame.tobytes())
         new_frame.sample_rate = 16000
+        self._put_audio_nowait(new_frame, eventpoint)
+
+    def _put_audio_nowait(self, frame, eventpoint=None):
+        audio_queue = self.__audio._queue
+        self._trim_audio_queue(audio_queue)
         try:
-            self.__audio._queue.put((new_frame, eventpoint), timeout=0.02)
+            audio_queue.put_nowait((frame, eventpoint))
+            return
         except queue.Full:
-            try:
-                self.__audio._queue.get_nowait()
-                self.__audio._dropped += 1
-            except queue.Empty:
-                pass
-            self.__audio._queue.put((new_frame, eventpoint))
+            self._drop_one_audio(audio_queue)
+        try:
+            audio_queue.put_nowait((frame, eventpoint))
+        except queue.Full:
+            self.__audio._dropped += 1
+
+    def _trim_audio_queue(self, audio_queue):
+        # Keep WebRTC audio low-latency and never block the avatar render loop.
+        max_buffered_chunks = 12
+        while audio_queue.qsize() >= max_buffered_chunks:
+            self._drop_one_audio(audio_queue)
+
+    def _drop_one_audio(self, audio_queue):
+        try:
+            audio_queue.get_nowait()
+            self.__audio._dropped += 1
+        except queue.Empty:
+            pass
 
     def get_buffer_size(self) -> int:
         return self.__video._queue.qsize()

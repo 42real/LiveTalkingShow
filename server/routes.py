@@ -58,6 +58,8 @@ _motion_face_detector_lock = threading.Lock()
 MOTION_UPLOAD_MAX_BYTES = int(os.getenv("MOTION_UPLOAD_MAX_BYTES", str(512 * 1024 * 1024)))
 MOTION_ALLOWED_SOURCE_DIRS = ("tmp/uploaded_sources", "data")
 MOTION_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+MOTION_PLAY_MODES = {"forward", "pingpong", "reverse", "random_direction"}
+AVATAR_MOTION_CONFIG = "motion.json"
 
 
 @dataclass
@@ -108,10 +110,64 @@ def _motion_pads(params: dict) -> list[int]:
     pads = params.get("pads")
     if pads is None:
         pads = [params.get("top", 0), params.get("bottom", 10), params.get("left", 0), params.get("right", 0)]
-    values = [int(value) for value in list(pads)[:4]]
+    elif isinstance(pads, str):
+        pads = pads.replace("，", ",").replace(" ", ",").split(",")
+    elif isinstance(pads, (int, float)):
+        pads = [pads]
+    values = []
+    for value in list(pads):
+        if str(value).strip() == "":
+            continue
+        values.append(int(value))
+        if len(values) == 4:
+            break
     while len(values) < 4:
         values.append(0)
     return values
+
+
+def _motion_box(value) -> list[int] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        items = value.replace("，", ",").replace(" ", ",").split(",")
+    else:
+        items = list(value)
+    values = [int(item) for item in items if str(item).strip()][:4]
+    if len(values) != 4:
+        raise ValueError("fixed_face_box must contain 4 numbers")
+    return values
+
+
+def _bool_param(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_param(value, default: int = 1, min_value: int = 1, max_value: int = 100) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
+def _float_param(value, default: float = 1.0, min_value: float = 0.0, max_value: float = 1000.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
+def _motion_play_mode(value, default: str = "forward") -> str:
+    play_mode = str(value or default).strip().lower()
+    return play_mode if play_mode in MOTION_PLAY_MODES else default
 
 
 def _motion_tags(value) -> list[str]:
@@ -131,6 +187,38 @@ def _motion_kind(params: dict) -> str:
 
 def _motion_root_for_kind(kind: str) -> str:
     return "data/idle_actions" if kind == "idle" else "data/speaking_actions"
+
+
+def _avatar_motion_config_path(avatar_id: str) -> Path:
+    return Path.cwd() / "data" / "avatars" / avatar_id / AVATAR_MOTION_CONFIG
+
+
+def _avatar_uses_local_motion_format(avatar_id: str) -> bool:
+    return _avatar_motion_config_path(avatar_id).exists()
+
+
+def _avatar_motion_root(avatar_id: str, kind: str) -> Path:
+    return Path.cwd() / "data" / "avatars" / avatar_id / "motions" / kind
+
+
+def _legacy_motion_root(avatar_id: str, kind: str) -> Path:
+    return Path.cwd() / _motion_root_for_kind(kind) / avatar_id
+
+
+def _motion_clip_root(avatar_id: str, kind: str, out_root: str = "") -> Path:
+    raw_root = str(out_root or "").strip()
+    if raw_root:
+        return _motion_output_root(kind, raw_root) / avatar_id
+    if _avatar_uses_local_motion_format(avatar_id):
+        return _avatar_motion_root(avatar_id, kind)
+    return _legacy_motion_root(avatar_id, kind)
+
+
+def _motion_create_clip_root(avatar_id: str, kind: str, out_root: str = "") -> Path:
+    raw_root = str(out_root or "").strip()
+    if raw_root:
+        return _motion_output_root(kind, raw_root) / avatar_id
+    return _avatar_motion_root(avatar_id, kind)
 
 
 def _motion_output_root(kind: str, out_root: str = "") -> Path:
@@ -193,6 +281,12 @@ def _ensure_motion_video_file(source_path: Path) -> None:
         raise ValueError("source must be a video file")
     if source_path.suffix.lower() not in MOTION_VIDEO_SUFFIXES:
         raise ValueError("only video files are supported")
+
+
+def _ensure_motion_build_source(source_path: Path) -> None:
+    if source_path.is_dir():
+        return
+    _ensure_motion_video_file(source_path)
 
 
 def _safe_upload_filename(filename: str) -> str:
@@ -368,7 +462,7 @@ def _get_motion_face_detector():
 
 def _detect_motion_preview(source: str, pads: list[int], time_sec: float, chroma_key: bool) -> dict:
     source_path = _motion_source_path(source)
-    _ensure_motion_video_file(source_path)
+    _ensure_motion_build_source(source_path)
 
     from tools.build_speaking_motion_clip import chroma_key_green, frame_for_detection
 
@@ -402,11 +496,16 @@ def _motion_avatar_id(params: dict, avatar_session) -> str:
     return _clean_motion_id(avatar_id, "avatar_id")
 
 
-def _list_motion_clip_metadata(avatar_id: str, out_root: str = "data/speaking_actions") -> list[dict]:
-    root = Path(out_root) / avatar_id
+def _list_motion_clip_metadata(avatar_id: str, out_root: str = "", kind: str = "speaking") -> list[dict]:
+    if out_root:
+        kind = "idle" if str(out_root).replace("\\", "/").rstrip("/").endswith("idle_actions") else "speaking"
+    root = _motion_clip_root(avatar_id, kind, out_root)
     if not root.is_dir():
         return []
 
+    motion_config = _read_avatar_motion_config(avatar_id) if not out_root else {}
+    clip_overrides = _avatar_motion_clip_overrides(avatar_id, kind, motion_config) if not out_root else {}
+    default_play_mode = _avatar_motion_default_play_mode(motion_config, kind)
     clips = []
     for action_dir in sorted([path for path in root.iterdir() if path.is_dir()], key=lambda path: path.name):
         metadata_path = action_dir / "metadata.json"
@@ -419,12 +518,157 @@ def _list_motion_clip_metadata(avatar_id: str, out_root: str = "data/speaking_ac
         metadata["action_id"] = action_dir.name
         metadata.setdefault("display_name", action_dir.name)
         metadata.setdefault("avatar_id", avatar_id)
+        metadata.setdefault("kind", kind)
+        _apply_avatar_motion_clip_override(metadata, clip_overrides.get(action_dir.name))
+        metadata["play_mode"] = _motion_play_mode(metadata.get("play_mode"), default_play_mode)
+        metadata["can_reverse"] = _bool_param(metadata.get("can_reverse"), False)
+        metadata["weight"] = _float_param(metadata.get("weight"), 1.0, 0.0, 1000.0)
+        metadata["min_cycles"] = _int_param(metadata.get("min_cycles"), 1, 1, 100)
+        metadata["max_cycles"] = _int_param(metadata.get("max_cycles"), metadata["min_cycles"], metadata["min_cycles"], 100)
+        metadata["switch_at_boundary"] = _bool_param(metadata.get("switch_at_boundary"), True)
+        metadata["enabled"] = _bool_param(metadata.get("enabled"), True)
         if "frame_count" not in metadata:
             full_imgs = action_dir / "full_imgs"
             metadata["frame_count"] = len(list(full_imgs.glob("*.png"))) if full_imgs.is_dir() else 0
         metadata["current"] = False
         clips.append(metadata)
     return clips
+
+
+def _read_avatar_motion_config(avatar_id: str) -> dict:
+    config_path = _avatar_motion_config_path(avatar_id)
+    if not config_path.exists():
+        return {}
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8-sig") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _avatar_motion_default_play_mode(config: dict, kind: str) -> str:
+    if not isinstance(config, dict) or not config:
+        return "pingpong" if kind == "idle" else "forward"
+    states = config.get("states") if isinstance(config.get("states"), dict) else {}
+    state = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    return _motion_play_mode(state.get("default_play_mode"), "forward")
+
+
+def _request_motion_default_play_mode(avatar_id: str, kind: str, out_root: str = "", create: bool = False) -> str:
+    if str(out_root or "").strip():
+        return "pingpong" if kind == "idle" else "forward"
+    config = _read_avatar_motion_config(avatar_id)
+    if config:
+        return _avatar_motion_default_play_mode(config, kind)
+    if create:
+        return "forward"
+    return "pingpong" if kind == "idle" else "forward"
+
+
+def _avatar_motion_clip_overrides(avatar_id: str, kind: str, config: dict | None = None) -> dict:
+    config = config if isinstance(config, dict) else _read_avatar_motion_config(avatar_id)
+    states = config.get("states") if isinstance(config.get("states"), dict) else {}
+    state = states.get(kind) if isinstance(states.get(kind), dict) else {}
+    clips = state.get("clips") if isinstance(state.get("clips"), list) else []
+    overrides = {}
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        action_id = str(clip.get("action_id", "")).strip()
+        if action_id:
+            overrides[action_id] = clip
+    return overrides
+
+
+def _apply_avatar_motion_clip_override(metadata: dict, override: dict | None) -> dict:
+    if not isinstance(override, dict):
+        return metadata
+    for key in (
+        "display_name",
+        "description",
+        "best_for",
+        "tags",
+        "play_mode",
+        "can_reverse",
+        "weight",
+        "min_cycles",
+        "max_cycles",
+        "switch_at_boundary",
+        "enabled",
+    ):
+        if key in override:
+            metadata[key] = override[key]
+    return metadata
+
+
+def _write_avatar_motion_config(avatar_id: str, config: dict) -> None:
+    config_path = _avatar_motion_config_path(avatar_id)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _ensure_avatar_motion_config(avatar_id: str) -> dict:
+    config = _read_avatar_motion_config(avatar_id)
+    if not config:
+        config = {
+            "version": 1,
+            "layout": "avatar-local-motion",
+            "strategy": os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"),
+            "states": {
+                "idle": {
+                    "path": "motions/idle",
+                    "selection": "auto",
+                    "strategy": os.getenv("LIVETALKING_IDLE_MOTION_STRATEGY", "weighted_no_repeat"),
+                    "default_play_mode": "forward",
+                },
+                "speaking": {
+                    "path": "motions/speaking",
+                    "selection": "auto",
+                    "strategy": os.getenv("LIVETALKING_SPEAKING_MOTION_STRATEGY", "weighted_no_repeat"),
+                    "default_play_mode": "forward",
+                },
+            },
+        }
+    states = config.setdefault("states", {})
+    for kind in ("idle", "speaking"):
+        state = states.setdefault(kind, {})
+        state.setdefault("path", f"motions/{kind}")
+        state.setdefault("selection", "auto")
+        state.setdefault("strategy", os.getenv(
+            "LIVETALKING_IDLE_MOTION_STRATEGY" if kind == "idle" else "LIVETALKING_SPEAKING_MOTION_STRATEGY",
+            os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"),
+        ))
+        state.setdefault("default_play_mode", "forward")
+    config.setdefault("version", 1)
+    config.setdefault("layout", "avatar-local-motion")
+    config.setdefault("strategy", os.getenv("LIVETALKING_MOTION_STRATEGY", "weighted_no_repeat"))
+    _write_avatar_motion_config(avatar_id, config)
+    return config
+
+
+def _sync_avatar_motion_clip_config(avatar_id: str, kind: str, action_id: str, metadata: dict | None, remove: bool = False) -> None:
+    config = _ensure_avatar_motion_config(avatar_id)
+    state = config.setdefault("states", {}).setdefault(kind, {})
+    clips = state.setdefault("clips", [])
+    clips = [clip for clip in clips if isinstance(clip, dict) and clip.get("action_id") != action_id]
+    if not remove:
+        metadata = metadata or {}
+        clips.append({
+            "action_id": action_id,
+            "display_name": metadata.get("display_name", action_id),
+            "description": metadata.get("description", ""),
+            "best_for": metadata.get("best_for", ""),
+            "enabled": _bool_param(metadata.get("enabled"), True),
+            "weight": _float_param(metadata.get("weight"), 1.0, 0.0, 1000.0),
+            "play_mode": _motion_play_mode(metadata.get("play_mode"), "forward"),
+            "can_reverse": _bool_param(metadata.get("can_reverse"), False),
+            "min_cycles": _int_param(metadata.get("min_cycles"), 1, 1, 100),
+            "max_cycles": _int_param(metadata.get("max_cycles"), metadata.get("min_cycles", 1), 1, 100),
+            "switch_at_boundary": _bool_param(metadata.get("switch_at_boundary"), True),
+            "tags": _motion_tags(metadata.get("tags", [])),
+        })
+    state["clips"] = sorted(clips, key=lambda clip: str(clip.get("action_id", "")))
+    _write_avatar_motion_config(avatar_id, config)
 
 
 def _clip_text(clip: dict) -> str:
@@ -953,11 +1197,11 @@ async def motion_clips(request):
         avatar_session = get_session(request, sessionid) if sessionid else None
         if avatar_session is None:
             avatar_id = _clean_motion_id(params.get("avatar_id", os.getenv("AVATAR_ID", "")), "avatar_id")
-            out_root = str(_motion_output_root(kind, params.get("out_root", "")))
+            out_root = str(_motion_output_root(kind, params["out_root"])) if params.get("out_root") else ""
             return json_ok(data={
                 "sessionid": sessionid,
                 "kind": kind,
-                "clips": _list_motion_clip_metadata(avatar_id, out_root),
+                "clips": _list_motion_clip_metadata(avatar_id, out_root, kind),
             })
         list_method = "list_idle_motions" if kind == "idle" else "list_speaking_motions"
         if not hasattr(avatar_session, list_method):
@@ -993,7 +1237,7 @@ async def motion_plan(request):
         if avatar_session is not None and hasattr(avatar_session, "list_speaking_motions"):
             clips = avatar_session.list_speaking_motions()
         else:
-            clips = _list_motion_clip_metadata(avatar_id, _motion_root_for_kind("speaking"))
+            clips = _list_motion_clip_metadata(avatar_id, _motion_root_for_kind("speaking"), "speaking")
         clips = [_compact_motion_clip(clip) for clip in clips if clip.get("action_id")]
         if not clips:
             return json_error("no speaking motion clips found")
@@ -1111,7 +1355,7 @@ async def motion_source_detect(request):
             source,
             pads,
             time_sec,
-            bool(params.get("chroma_key", False)),
+            _bool_param(params.get("chroma_key"), False),
         )
         return json_ok(data=data)
     except Exception as e:
@@ -1155,12 +1399,12 @@ async def motion_update_clip(request):
         avatar_id = _motion_avatar_id(params, avatar_session)
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
         next_action_id = _clean_motion_id(params.get("next_action_id", action_id), "next_action_id")
-        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
-
-        root = Path(out_root) / avatar_id
+        explicit_out_root = str(params.get("out_root", "")).strip()
+        root = _motion_clip_root(avatar_id, kind, explicit_out_root)
         source_dir = root / action_id
         if not source_dir.is_dir():
             return json_error(f"motion clip not found: {action_id}")
+        default_play_mode = _request_motion_default_play_mode(avatar_id, kind, explicit_out_root)
 
         target_dir = root / next_action_id
         if next_action_id != action_id:
@@ -1188,12 +1432,42 @@ async def motion_update_clip(request):
             metadata["best_for"] = str(params.get("best_for", "")).strip()
         if "tags" in params:
             metadata["tags"] = _motion_tags(params.get("tags"))
+        if "play_mode" in params:
+            metadata["play_mode"] = _motion_play_mode(params.get("play_mode"), default_play_mode)
+        else:
+            metadata.setdefault("play_mode", default_play_mode)
+        if "can_reverse" in params:
+            metadata["can_reverse"] = _bool_param(params.get("can_reverse"), False)
+        else:
+            metadata.setdefault("can_reverse", False)
+        if "weight" in params:
+            metadata["weight"] = _float_param(params.get("weight"), 1.0, 0.0, 1000.0)
+        else:
+            metadata.setdefault("weight", 1.0)
+        if "min_cycles" in params:
+            metadata["min_cycles"] = _int_param(params.get("min_cycles"), 1, 1, 100)
+        else:
+            metadata.setdefault("min_cycles", 1)
+        if "max_cycles" in params:
+            metadata["max_cycles"] = _int_param(params.get("max_cycles"), metadata.get("min_cycles", 1), int(metadata.get("min_cycles", 1) or 1), 100)
+        else:
+            metadata.setdefault("max_cycles", metadata.get("min_cycles", 1))
+        if "switch_at_boundary" in params:
+            metadata["switch_at_boundary"] = _bool_param(params.get("switch_at_boundary"), True)
+        else:
+            metadata.setdefault("switch_at_boundary", True)
+        if "enabled" in params:
+            metadata["enabled"] = _bool_param(params.get("enabled"), True)
+        else:
+            metadata.setdefault("enabled", True)
         metadata["updated_at"] = datetime.now().isoformat(timespec="seconds")
 
         metadata_path.write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
+            _sync_avatar_motion_clip_config(avatar_id, kind, next_action_id, metadata)
 
         clips = None
         selected = None
@@ -1230,9 +1504,8 @@ async def motion_delete_clip(request):
         avatar_session = get_session(request, sessionid) if sessionid else None
         avatar_id = _motion_avatar_id(params, avatar_session)
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
-        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
-
-        root = (Path(out_root) / avatar_id).resolve()
+        explicit_out_root = str(params.get("out_root", "")).strip()
+        root = _motion_clip_root(avatar_id, kind, explicit_out_root).resolve()
         target_dir = (root / action_id).resolve()
         if root not in target_dir.parents:
             return json_error("invalid motion clip path")
@@ -1248,6 +1521,8 @@ async def motion_delete_clip(request):
         )
 
         shutil.rmtree(target_dir)
+        if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
+            _sync_avatar_motion_clip_config(avatar_id, kind, action_id, None, remove=True)
 
         clips = None
         selected = None
@@ -1257,7 +1532,7 @@ async def motion_delete_clip(request):
                 selected = getattr(avatar_session, select_method)("")
 
         if clips is None:
-            clips = _list_motion_clip_metadata(avatar_id, str(root.parent))
+            clips = _list_motion_clip_metadata(avatar_id, explicit_out_root, kind)
 
         return json_ok(data={
             "sessionid": sessionid,
@@ -1288,26 +1563,28 @@ async def motion_create_clip(request):
         action_id = _clean_motion_id(params.get("action_id", ""), "action_id")
 
         source_path = _motion_source_path(params.get("source", ""))
-        _ensure_motion_video_file(source_path)
+        _ensure_motion_build_source(source_path)
         source = str(source_path)
         if not source:
             return json_error("source is required")
 
-        out_root = str(_motion_output_root(kind, params.get("out_root", "")))
-        target_dir = Path(out_root) / avatar_id / action_id
+        explicit_out_root = str(params.get("out_root", "")).strip()
+        target_root = _motion_create_clip_root(avatar_id, kind, explicit_out_root)
+        default_play_mode = _request_motion_default_play_mode(avatar_id, kind, explicit_out_root, create=True)
+        target_dir = target_root / action_id
         if target_dir.exists() and not (target_dir / "metadata.json").exists():
             logger.info("remove incomplete motion clip before rebuild: %s", target_dir)
             shutil.rmtree(target_dir)
 
-        fixed_face_box = params.get("fixed_face_box")
-        use_fixed_face_box = bool(params.get("use_fixed_face_box", False))
+        fixed_face_box = _motion_box(params.get("fixed_face_box"))
+        use_fixed_face_box = _bool_param(params.get("use_fixed_face_box"), False)
         if not fixed_face_box and use_fixed_face_box:
             preview = await asyncio.to_thread(
                 _detect_motion_preview,
                 source,
                 _motion_pads(params),
                 float(params.get("start", 0) or 0),
-                bool(params.get("chroma_key", False)),
+                _bool_param(params.get("chroma_key"), False),
             )
             padded_box = preview.get("padded_box") or {}
             fixed_face_box = [
@@ -1322,7 +1599,7 @@ async def motion_create_clip(request):
             avatar_id=avatar_id,
             action_id=action_id,
             display_name=str(params.get("display_name", "")).strip(),
-            out_root=out_root,
+            out_root=str(target_root.parent),
             start=float(params.get("start", 0) or 0),
             end=float(params["end"]) if params.get("end") not in (None, "") else None,
             fps=float(params.get("fps", 25) or 25),
@@ -1333,12 +1610,19 @@ async def motion_create_clip(request):
             max_frames=int(params.get("max_frames", 0) or 0),
             tags=str(params.get("tags", "idle,teaching" if kind == "idle" else "speaking,teaching")),
             best_for=str(params.get("best_for", "")),
-            chroma_key=bool(params.get("chroma_key", False)),
-            use_ffmpeg_cut=bool(params.get("use_ffmpeg_cut", False)),
+            play_mode=_motion_play_mode(params.get("play_mode"), default_play_mode),
+            can_reverse=_bool_param(params.get("can_reverse"), False),
+            weight=_float_param(params.get("weight"), 1.0, 0.0, 1000.0),
+            min_cycles=_int_param(params.get("min_cycles"), 1, 1, 100),
+            max_cycles=_int_param(params.get("max_cycles"), _int_param(params.get("min_cycles"), 1, 1, 100), 1, 100),
+            switch_at_boundary=_bool_param(params.get("switch_at_boundary"), True),
+            enabled=_bool_param(params.get("enabled"), True),
+            chroma_key=_bool_param(params.get("chroma_key"), False),
+            use_ffmpeg_cut=_bool_param(params.get("use_ffmpeg_cut"), False),
             ffmpeg_path=_default_ffmpeg_path(params.get("ffmpeg_path", "")),
-            nosmooth=bool(params.get("nosmooth", False)),
-            no_loop=bool(params.get("no_loop", False)),
-            overwrite=bool(params.get("overwrite", False)),
+            nosmooth=_bool_param(params.get("nosmooth"), False),
+            no_loop=_bool_param(params.get("no_loop"), False),
+            overwrite=_bool_param(params.get("overwrite"), False),
         )
 
         from tools.build_speaking_motion_clip import build_clip
@@ -1350,13 +1634,15 @@ async def motion_create_clip(request):
                 logger.info("remove incomplete motion clip after failed build: %s", target_dir)
                 shutil.rmtree(target_dir)
             raise
-        metadata_path = Path(out_root) / avatar_id / action_id / "metadata.json"
+        metadata_path = target_dir / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["kind"] = kind
         metadata_path.write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        if not explicit_out_root or _avatar_uses_local_motion_format(avatar_id):
+            _sync_avatar_motion_clip_config(avatar_id, kind, action_id, metadata)
         clips = None
         reload_method = "reload_idle_motions" if kind == "idle" else "reload_speaking_motions"
         if avatar_session is not None and hasattr(avatar_session, reload_method):

@@ -128,7 +128,7 @@ class MuseReal(BaseAvatar):
         self.asr.warm_up()
     
 
-    def inference_batch(self, index, audiofeat_batch):
+    def inference_batch(self, index, audiofeat_batch, render_context=None):
         # 这里的 index 是针对当前 avatar 的索引
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
         length = len(self.input_latent_list_cycle)
@@ -152,7 +152,7 @@ class MuseReal(BaseAvatar):
         pred = self.vae.decode_latents(pred_latents)
         return pred
 
-    def paste_back_frame(self,pred_frame,idx:int):
+    def paste_back_frame(self,pred_frame,idx:int, render_context=None):
         bbox = self.coord_list_cycle[idx]
         ori_frame = copy.deepcopy(self.frame_list_cycle[idx])
         x1, y1, x2, y2 = bbox

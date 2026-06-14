@@ -1,6 +1,7 @@
 const avatar = document.getElementById('avatar');
 const urlParams = new URLSearchParams(window.location.search);
 let frameRenderer = createFrameRenderer(avatar);
+let packedRenderer = null;
 
 let serverBase = urlParams.get('server') || 'http://127.0.0.1:8050';
 let clickThrough = urlParams.get('clickThrough') === '1';
@@ -11,11 +12,18 @@ let zoomScale = clampScale(readPositiveFloatParam('scale', 1));
 let videoMaxWidth = readNonNegativeIntParam('videoMaxWidth', 0);
 let videoMaxHeight = readNonNegativeIntParam('videoMaxHeight', 0);
 let videoFps = readPositiveFloatParam('videoFps', 0);
-let videoFormat = readFormatParam('videoFormat', 'raw');
+let videoFormat = readFormatParam('videoFormat', 'bgra');
 let videoQuality = readQualityParam('videoQuality', 80);
+let outputMode = readOutputModeParam('output', 'ws');
 
 let socket = null;
 let audioSocket = null;
+let rtcPeer = null;
+let rtcAudioTrack = null;
+let rtcAudioElement = null;
+let packedVideoElement = null;
+let packedRenderHandle = null;
+let packedRenderHandleType = '';
 let sessionId = null;
 let sessionPromise = null;
 let audioContext = null;
@@ -32,7 +40,15 @@ let frameStats = {
   drawn: 0,
   dropped: 0,
   lastFpsAt: performance.now(),
-  lastDrawn: 0
+  lastDrawn: 0,
+  lastReceiveAt: 0,
+  receiveGapMs: 0,
+  receiveGapCount: 0,
+  maxReceiveGapMs: 0,
+  lastDrawAt: 0,
+  drawGapMs: 0,
+  drawGapCount: 0,
+  maxDrawGapMs: 0
 };
 let lastWindowRequest = {
   width: 0,
@@ -45,6 +61,7 @@ let lastSourceFrame = {
 };
 let lastFrameSignature = '';
 let firstFrameLogged = false;
+let lastPackedMediaTime = -1;
 
 function log(message, data) {
   window.overlayApi?.log?.('viewer', message, data);
@@ -62,7 +79,14 @@ function readNonNegativeIntParam(name, fallback) {
 
 function readFormatParam(name, fallback) {
   const value = (urlParams.get(name) || '').trim().toLowerCase();
-  return ['raw', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+  return ['raw', 'rgba', 'rgba8', 'bgra', 'bgra8', 'jpeg', 'jpg', 'png', 'webp'].includes(value) ? value : fallback;
+}
+
+function readOutputModeParam(name, fallback) {
+  const value = (urlParams.get(name) || '').trim().toLowerCase();
+  if (['webrtc-packed', 'packed-webrtc', 'packed', 'webrtc'].includes(value)) return 'webrtc-packed';
+  if (['ws', 'websocket', 'raw'].includes(value)) return 'ws';
+  return fallback;
 }
 
 function readQualityParam(name, fallback) {
@@ -84,6 +108,14 @@ function wsUrl(server, path) {
   return url.toString();
 }
 
+function httpUrl(server, path) {
+  const url = new URL(server);
+  const [pathname, search = ''] = path.split('?');
+  url.pathname = pathname;
+  url.search = search;
+  return url.toString();
+}
+
 function alphaVideoPath() {
   const params = new URLSearchParams();
   if (videoMaxWidth > 0) params.set('max_width', String(videoMaxWidth));
@@ -96,7 +128,20 @@ function alphaVideoPath() {
 }
 
 function connect() {
+  if (outputMode === 'webrtc-packed') {
+    connectPackedWebRTC().catch((error) => {
+      console.error(error);
+      log('packed webrtc connect failed', { error: String(error) });
+      scheduleVideoReconnect();
+    });
+    return;
+  }
+  connectAlphaWebSocket();
+}
+
+function connectAlphaWebSocket() {
   if (reconnectVideoTimer) clearTimeout(reconnectVideoTimer);
+  reconnectVideoTimer = null;
   if (socket) {
     socket.onclose = null;
     socket.close();
@@ -132,13 +177,270 @@ function connect() {
   };
   socket.onmessage = (event) => {
     frameStats.received++;
+    recordReceiveGap();
     if (pendingFrame) frameStats.dropped++;
     pendingFrame = event.data;
     scheduleDraw();
   };
 }
 
+function scheduleVideoReconnect() {
+  if (closing) return;
+  if (reconnectVideoTimer) clearTimeout(reconnectVideoTimer);
+  reconnectVideoTimer = setTimeout(connect, 2000);
+}
+
+async function connectPackedWebRTC() {
+  if (reconnectVideoTimer) clearTimeout(reconnectVideoTimer);
+  reconnectVideoTimer = null;
+  stopAlphaWebSocket();
+  stopAudioSocket();
+  stopPackedWebRTC();
+
+  const pc = new RTCPeerConnection({
+    sdpSemantics: 'unified-plan',
+    bundlePolicy: 'max-bundle'
+  });
+  rtcPeer = pc;
+
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+  pc.addTransceiver('video', { direction: 'recvonly' });
+
+  pc.addEventListener('connectionstatechange', () => {
+    log('packed webrtc connection state', { state: pc.connectionState, sessionId });
+    if (['failed', 'disconnected', 'closed'].includes(pc.connectionState) && !closing && rtcPeer === pc) {
+      scheduleVideoReconnect();
+    }
+  });
+
+  pc.addEventListener('iceconnectionstatechange', () => {
+    log('packed webrtc ice state', { state: pc.iceConnectionState });
+  });
+
+  pc.addEventListener('track', (event) => {
+    log('packed webrtc track', {
+      kind: event.track.kind,
+      id: event.track.id,
+      mid: event.transceiver?.mid || ''
+    });
+    if (event.track.kind === 'audio') {
+      rtcAudioTrack = event.track;
+      applyRtcAudioPlayback();
+      return;
+    }
+    attachPackedVideoTrack(event.track);
+  });
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitIceComplete(pc);
+
+  log('send packed webrtc offer', { serverBase, url: httpUrl(serverBase, '/alpha/webrtc/packed_offer') });
+  const offerPayload = {
+    sdp: pc.localDescription.sdp,
+    type: pc.localDescription.type
+  };
+  if (videoMaxWidth > 0) offerPayload.max_width = videoMaxWidth;
+  if (videoMaxHeight > 0) offerPayload.max_height = videoMaxHeight;
+  if (videoFps > 0) offerPayload.fps = videoFps;
+  const response = await fetch(httpUrl(serverBase, '/alpha/webrtc/packed_offer'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(offerPayload)
+  });
+  const answer = await response.json();
+  if (!response.ok || !answer.sdp) {
+    throw new Error(answer.msg || `packed offer failed: ${response.status}`);
+  }
+
+  sessionId = String(answer.sessionid || '');
+  sessionPromise = Promise.resolve(sessionId);
+  await pc.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
+  log('packed webrtc connected', { sessionId, tracks: answer.tracks });
+}
+
+function waitIceComplete(peer) {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (peer.iceGatheringState === 'complete') {
+        peer.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+    };
+    peer.addEventListener('icegatheringstatechange', check);
+  });
+}
+
+function stopAlphaWebSocket() {
+  if (reconnectVideoTimer) clearTimeout(reconnectVideoTimer);
+  reconnectVideoTimer = null;
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+    socket = null;
+  }
+}
+
+function stopPackedWebRTC() {
+  cancelPackedRenderLoop();
+  const peer = rtcPeer;
+  rtcPeer = null;
+  if (peer) {
+    peer.ontrack = null;
+    for (const sender of peer.getSenders()) {
+      if (sender.track) sender.track.stop();
+    }
+    for (const receiver of peer.getReceivers()) {
+      if (receiver.track) receiver.track.stop();
+    }
+    peer.close();
+  }
+  if (packedVideoElement) {
+    packedVideoElement.pause();
+    packedVideoElement.srcObject = null;
+    packedVideoElement.remove();
+    packedVideoElement = null;
+  }
+  stopRtcAudioPlayback();
+  rtcAudioTrack = null;
+}
+
+function attachPackedVideoTrack(track) {
+  if (packedVideoElement) {
+    packedVideoElement.pause();
+    packedVideoElement.srcObject = null;
+    packedVideoElement.remove();
+  }
+  packedVideoElement = document.createElement('video');
+  packedVideoElement.autoplay = true;
+  packedVideoElement.playsInline = true;
+  packedVideoElement.muted = true;
+  packedVideoElement.disablePictureInPicture = true;
+  packedVideoElement.className = 'media-decode-sink';
+  packedVideoElement.srcObject = new MediaStream([track]);
+  document.body.appendChild(packedVideoElement);
+  packedVideoElement.addEventListener('loadedmetadata', () => {
+    log('packed video metadata', {
+      packedWidth: packedVideoElement.videoWidth,
+      height: packedVideoElement.videoHeight,
+      logicalWidth: Math.floor((packedVideoElement.videoWidth || 0) / 2),
+      readyState: packedVideoElement.readyState
+    });
+    startPackedRenderLoop();
+  });
+  packedVideoElement.play()
+    .then(startPackedRenderLoop)
+    .catch((error) => log('packed video play blocked', { error: String(error) }));
+}
+
+function applyRtcAudioPlayback() {
+  if (outputMode !== 'webrtc-packed' || !rtcAudioTrack) return;
+  if (!playAudio) {
+    stopRtcAudioPlayback();
+    return;
+  }
+  if (!rtcAudioElement) {
+    rtcAudioElement = document.createElement('audio');
+    rtcAudioElement.autoplay = true;
+    rtcAudioElement.controls = false;
+    rtcAudioElement.style.display = 'none';
+    document.body.appendChild(rtcAudioElement);
+  }
+  rtcAudioElement.srcObject = new MediaStream([rtcAudioTrack]);
+  rtcAudioElement.play().catch((error) => log('packed audio play blocked', { error: String(error) }));
+}
+
+function stopRtcAudioPlayback() {
+  if (!rtcAudioElement) return;
+  rtcAudioElement.pause();
+  rtcAudioElement.srcObject = null;
+  rtcAudioElement.remove();
+  rtcAudioElement = null;
+}
+
+function startPackedRenderLoop() {
+  if (!packedVideoElement) return;
+  if (packedRenderHandle !== null) return;
+  packedRenderer = packedRenderer || createPackedWebRTCRenderer(avatar);
+  schedulePackedRenderFrame();
+}
+
+function cancelPackedRenderLoop() {
+  if (packedRenderHandle === null) return;
+  if (
+    packedRenderHandleType === 'videoFrame' &&
+    packedVideoElement &&
+    typeof packedVideoElement.cancelVideoFrameCallback === 'function'
+  ) {
+    packedVideoElement.cancelVideoFrameCallback(packedRenderHandle);
+  } else {
+    cancelAnimationFrame(packedRenderHandle);
+  }
+  packedRenderHandle = null;
+  packedRenderHandleType = '';
+}
+
+function schedulePackedRenderFrame() {
+  if (!packedVideoElement || closing || outputMode !== 'webrtc-packed') return;
+  if (
+    packedVideoElement.readyState >= 2 &&
+    typeof packedVideoElement.requestVideoFrameCallback === 'function'
+  ) {
+    packedRenderHandleType = 'videoFrame';
+    packedRenderHandle = packedVideoElement.requestVideoFrameCallback((_now, metadata = {}) => {
+      packedRenderHandle = null;
+      if (typeof metadata.mediaTime !== 'number' || metadata.mediaTime !== lastPackedMediaTime) {
+        lastPackedMediaTime = metadata.mediaTime;
+        drawPackedVideoFrame(metadata);
+      }
+      schedulePackedRenderFrame();
+    });
+    return;
+  }
+
+  packedRenderHandleType = 'animationFrame';
+  packedRenderHandle = requestAnimationFrame(() => {
+    packedRenderHandle = null;
+    drawPackedVideoFrame();
+    schedulePackedRenderFrame();
+  });
+}
+
+function drawPackedVideoFrame(metadata = {}) {
+  const video = packedVideoElement;
+  if (!video || video.readyState < 2) return;
+
+  const packedWidth = video.videoWidth || 0;
+  const height = video.videoHeight || 0;
+  const width = Math.max(1, Math.floor(packedWidth / 2));
+  if (!packedWidth || !height) return;
+
+  const signature = `${width}x${height}|packed=${packedWidth}`;
+  if (!firstFrameLogged || signature !== lastFrameSignature) {
+    firstFrameLogged = true;
+    lastFrameSignature = signature;
+    log('packed frame size', { width, height, packedWidth });
+  }
+
+  lastSourceFrame = { width, height };
+  requestWindowResize(width, height);
+  try {
+    packedRenderer.draw(video, width, height, packedWidth);
+  } catch (error) {
+    console.error(error);
+    log('packed renderer failed', { error: String(error) });
+    scheduleContextReload();
+    return;
+  }
+  frameStats.received++;
+  frameStats.drawn++;
+  recordDrawGap();
+  updateFpsStatus(metadata);
+}
+
 async function ensureAlphaSession() {
+  if (outputMode === 'webrtc-packed') return sessionId;
   if (!autoSession) return null;
   if (sessionPromise) return sessionPromise;
 
@@ -190,6 +492,10 @@ function closeAlphaSession() {
 }
 
 function connectAudio() {
+  if (outputMode === 'webrtc-packed') {
+    applyRtcAudioPlayback();
+    return;
+  }
   if (!playAudio) return;
   if (reconnectAudioTimer) clearTimeout(reconnectAudioTimer);
   if (audioSocket) {
@@ -281,6 +587,10 @@ function stopAudioSocket() {
 function scheduleDraw() {
   if (drawing) return;
   drawing = true;
+  if (outputMode === 'ws') {
+    queueMicrotask(drawLatestFrame);
+    return;
+  }
   requestAnimationFrame(drawLatestFrame);
 }
 
@@ -307,7 +617,8 @@ async function drawLatestFrame() {
     log('frame size', {
       width: parsed.width,
       height: parsed.height,
-      byteLength: packet.byteLength
+      byteLength: packet.byteLength,
+      format: parsed.formatName
     });
   }
 
@@ -323,6 +634,7 @@ async function drawLatestFrame() {
     return;
   }
   frameStats.drawn++;
+  recordDrawGap();
   updateFpsStatus();
 
   drawing = false;
@@ -388,7 +700,7 @@ function parseFrame(packet) {
     return null;
   }
 
-  if (format === 1) {
+  if (format === 1 || format === 5) {
     const expected = 24 + width * height * 4;
     if (packet.byteLength !== expected) {
       log('invalid frame payload length', { expected, actual: packet.byteLength, width, height });
@@ -398,6 +710,8 @@ function parseFrame(packet) {
       width,
       height,
       format,
+      formatName: format === 5 ? 'bgra' : 'rgba',
+      bgra: format === 5,
       rgba: new Uint8Array(packet, 24)
     };
   }
@@ -406,6 +720,7 @@ function parseFrame(packet) {
       width,
       height,
       format,
+      formatName: format === 2 ? 'jpeg' : format === 3 ? 'png' : 'webp',
       encoded: new Uint8Array(packet, 24)
     };
   }
@@ -442,9 +757,11 @@ function createFrameRenderer(canvas) {
     `
       precision mediump float;
       uniform sampler2D uTexture;
+      uniform bool uBgra;
       varying vec2 vTexCoord;
       void main() {
-        gl_FragColor = texture2D(uTexture, vTexCoord);
+        vec4 color = texture2D(uTexture, vTexCoord);
+        gl_FragColor = uBgra ? vec4(color.b, color.g, color.r, color.a) : color;
       }
     `
   );
@@ -478,6 +795,7 @@ function createFrameRenderer(canvas) {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.useProgram(program);
   gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
+  const bgraUniform = gl.getUniformLocation(program, 'uBgra');
   gl.disable(gl.BLEND);
 
   let textureWidth = 0;
@@ -486,7 +804,7 @@ function createFrameRenderer(canvas) {
 
   return {
     async draw(frame) {
-      if (frame.format !== 1) {
+      if (frame.format !== 1 && frame.format !== 5) {
         await drawEncodedFrame(canvas, frame);
         return;
       }
@@ -510,6 +828,7 @@ function createFrameRenderer(canvas) {
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(bgraUniform, frame.bgra ? 1 : 0);
       if (textureWidth !== frame.width || textureHeight !== frame.height) {
         textureWidth = frame.width;
         textureHeight = frame.height;
@@ -552,6 +871,10 @@ function createCanvas2dRenderer(canvas) {
     async draw(frame) {
       resizeCanvasToDisplaySize(canvas, frame.width, frame.height);
       if (frame.format !== 1) {
+        if (frame.format === 5) {
+          drawRawBgra2d(frame);
+          return;
+        }
         await drawEncodedFrame(canvas, frame);
         return;
       }
@@ -570,6 +893,131 @@ function createCanvas2dRenderer(canvas) {
       );
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
+    }
+  };
+
+  function drawRawBgra2d(frame) {
+    resizeCanvasToDisplaySize(canvas, frame.width, frame.height);
+    if (sourceCanvas.width !== frame.width || sourceCanvas.height !== frame.height) {
+      sourceCanvas.width = frame.width;
+      sourceCanvas.height = frame.height;
+    }
+    sourceCtx.putImageData(
+      new ImageData(bgraToRgba(frame.rgba), frame.width, frame.height),
+      0,
+      0
+    );
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
+  }
+}
+
+function bgraToRgba(bgra) {
+  const rgba = new Uint8ClampedArray(bgra.byteLength);
+  for (let i = 0; i < bgra.byteLength; i += 4) {
+    rgba[i] = bgra[i + 2];
+    rgba[i + 1] = bgra[i + 1];
+    rgba[i + 2] = bgra[i];
+    rgba[i + 3] = bgra[i + 3];
+  }
+  return rgba;
+}
+
+function createPackedWebRTCRenderer(canvas) {
+  const gl = canvas.getContext('webgl', {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    desynchronized: true,
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+    stencil: false
+  });
+  if (!gl) throw new Error('WebGL renderer is required for packed WebRTC alpha');
+
+  const program = createProgram(
+    gl,
+    `
+      attribute vec2 aPosition;
+      attribute vec2 aTexCoord;
+      varying vec2 vTexCoord;
+      void main() {
+        gl_Position = vec4(aPosition, 0.0, 1.0);
+        vTexCoord = aTexCoord;
+      }
+    `,
+    `
+      precision mediump float;
+      uniform sampler2D uPacked;
+      varying vec2 vTexCoord;
+      void main() {
+        vec2 colorCoord = vec2(vTexCoord.x * 0.5, vTexCoord.y);
+        vec2 alphaCoord = vec2(0.5 + vTexCoord.x * 0.5, vTexCoord.y);
+        vec4 color = texture2D(uPacked, colorCoord);
+        float alpha = texture2D(uPacked, alphaCoord).r;
+        gl_FragColor = vec4(color.rgb, alpha);
+      }
+    `
+  );
+
+  const vertices = new Float32Array([
+    -1, -1, 0, 1,
+     1, -1, 1, 1,
+    -1,  1, 0, 0,
+     1,  1, 1, 0
+  ]);
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
+  const position = gl.getAttribLocation(program, 'aPosition');
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
+
+  const texCoord = gl.getAttribLocation(program, 'aTexCoord');
+  gl.enableVertexAttribArray(texCoord);
+  gl.vertexAttribPointer(texCoord, 2, gl.FLOAT, false, stride, 2 * Float32Array.BYTES_PER_ELEMENT);
+
+  const texture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.useProgram(program);
+  gl.uniform1i(gl.getUniformLocation(program, 'uPacked'), 0);
+  gl.disable(gl.BLEND);
+
+  let lastCanvasSignature = '';
+
+  return {
+    draw(video, logicalWidth, logicalHeight, packedWidth) {
+      const resized = resizeCanvasToDisplaySize(canvas, logicalWidth, logicalHeight);
+      const canvasSignature = `${canvas.width}x${canvas.height}`;
+      if (resized || canvasSignature !== lastCanvasSignature) {
+        lastCanvasSignature = canvasSignature;
+        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+        log('packed renderer canvas size', {
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          clientWidth: canvas.clientWidth,
+          clientHeight: canvas.clientHeight,
+          drawingBufferWidth: gl.drawingBufferWidth,
+          drawingBufferHeight: gl.drawingBufferHeight,
+          sourceWidth: logicalWidth,
+          sourceHeight: logicalHeight,
+          packedWidth
+        });
+      }
+
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
   };
 }
@@ -628,19 +1076,71 @@ function createShader(gl, type, source) {
   return shader;
 }
 
-function updateFpsStatus() {
+function updateFpsStatus(metadata = {}) {
   const now = performance.now();
   if (now - frameStats.lastFpsAt < 1000) return;
   const fps = (frameStats.drawn - frameStats.lastDrawn) * 1000 / (now - frameStats.lastFpsAt);
   frameStats.lastDrawn = frameStats.drawn;
   frameStats.lastFpsAt = now;
-  console.debug(`raw alpha ${fps.toFixed(1)} fps, dropped ${frameStats.dropped}`);
+  console.debug(`${outputMode} alpha ${fps.toFixed(1)} fps, dropped ${frameStats.dropped}`);
+  const playbackQuality = packedVideoElement && typeof packedVideoElement.getVideoPlaybackQuality === 'function'
+    ? packedVideoElement.getVideoPlaybackQuality()
+    : null;
   log('fps', {
+    outputMode,
     fps: Number(fps.toFixed(1)),
     received: frameStats.received,
     drawn: frameStats.drawn,
-    dropped: frameStats.dropped
+    dropped: frameStats.dropped,
+    avgReceiveGapMs: frameStats.receiveGapCount
+      ? Number((frameStats.receiveGapMs / frameStats.receiveGapCount).toFixed(1))
+      : undefined,
+    maxReceiveGapMs: frameStats.maxReceiveGapMs ? Number(frameStats.maxReceiveGapMs.toFixed(1)) : undefined,
+    avgDrawGapMs: frameStats.drawGapCount
+      ? Number((frameStats.drawGapMs / frameStats.drawGapCount).toFixed(1))
+      : undefined,
+    maxDrawGapMs: frameStats.maxDrawGapMs ? Number(frameStats.maxDrawGapMs.toFixed(1)) : undefined,
+    mediaTime: typeof metadata.mediaTime === 'number' ? Number(metadata.mediaTime.toFixed(3)) : undefined,
+    presentedFrames: metadata.presentedFrames,
+    processingMs: typeof metadata.processingDuration === 'number'
+      ? Number((metadata.processingDuration * 1000).toFixed(2))
+      : undefined,
+    totalVideoFrames: playbackQuality ? playbackQuality.totalVideoFrames : undefined,
+    droppedVideoFrames: playbackQuality ? playbackQuality.droppedVideoFrames : undefined,
+    corruptedVideoFrames: playbackQuality ? playbackQuality.corruptedVideoFrames : undefined,
+    readyState: packedVideoElement ? packedVideoElement.readyState : undefined,
+    paused: packedVideoElement ? packedVideoElement.paused : undefined
   });
+  frameStats.receiveGapMs = 0;
+  frameStats.receiveGapCount = 0;
+  frameStats.maxReceiveGapMs = 0;
+  frameStats.drawGapMs = 0;
+  frameStats.drawGapCount = 0;
+  frameStats.maxDrawGapMs = 0;
+}
+
+function recordReceiveGap() {
+  const now = performance.now();
+  if (frameStats.lastReceiveAt > 0) {
+    const gap = now - frameStats.lastReceiveAt;
+    frameStats.receiveGapMs += gap;
+    frameStats.receiveGapCount++;
+    frameStats.maxReceiveGapMs = Math.max(frameStats.maxReceiveGapMs, gap);
+    if (gap > 80) log('video receive jitter', { gapMs: Number(gap.toFixed(1)), outputMode });
+  }
+  frameStats.lastReceiveAt = now;
+}
+
+function recordDrawGap() {
+  const now = performance.now();
+  if (frameStats.lastDrawAt > 0) {
+    const gap = now - frameStats.lastDrawAt;
+    frameStats.drawGapMs += gap;
+    frameStats.drawGapCount++;
+    frameStats.maxDrawGapMs = Math.max(frameStats.maxDrawGapMs, gap);
+    if (gap > 80) log('video draw jitter', { gapMs: Number(gap.toFixed(1)), outputMode });
+  }
+  frameStats.lastDrawAt = now;
 }
 
 function applyServer(server) {
@@ -651,6 +1151,8 @@ function applyServer(server) {
   sessionId = null;
   sessionPromise = null;
   resetAudio();
+  stopPackedWebRTC();
+  stopAlphaWebSocket();
   ensureAlphaSession();
   connect();
   if (playAudio) connectAudio();
@@ -661,7 +1163,10 @@ function applyInteractionState(state = {}) {
   log('apply interaction state', state);
   if (typeof state.playAudio === 'boolean' && state.playAudio !== playAudio) {
     playAudio = state.playAudio;
-    if (playAudio) connectAudio();
+    if (outputMode === 'webrtc-packed') {
+      if (playAudio) applyRtcAudioPlayback();
+      else stopRtcAudioPlayback();
+    } else if (playAudio) connectAudio();
     else stopAudioSocket();
   }
   document.body.classList.toggle('display', clickThrough);
@@ -671,6 +1176,12 @@ function applyInteractionState(state = {}) {
 function reconnectStreams() {
   log('reconnect streams');
   resetAudio();
+  stopPackedWebRTC();
+  stopAlphaWebSocket();
+  if (autoSession || outputMode === 'webrtc-packed') {
+    sessionId = null;
+    sessionPromise = null;
+  }
   ensureAlphaSession();
   connect();
   if (playAudio) connectAudio();
@@ -688,6 +1199,7 @@ log('viewer loaded', {
   videoFps,
   videoFormat,
   videoQuality,
+  outputMode,
   renderer: urlParams.get('renderer') || 'webgl',
   userAgent: navigator.userAgent,
   devicePixelRatio: window.devicePixelRatio
@@ -709,6 +1221,9 @@ window.addEventListener('beforeunload', () => {
   if (!closing) {
     closing = true;
   }
+  stopPackedWebRTC();
+  stopAlphaWebSocket();
+  stopAudioSocket();
   closeAlphaSession();
 });
 

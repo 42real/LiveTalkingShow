@@ -109,6 +109,7 @@ class RTCManager:
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
         sessionid = await session_manager.create_session(params)
+        session_manager.default_alpha_sessionid = sessionid
         logger.info("alpha webrtc offer sessionid=%s param_keys=%s", sessionid, sorted(params.keys()))
         avatar_session = session_manager.get_session(sessionid)
 
@@ -207,6 +208,7 @@ class RTCManager:
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
         sessionid = await session_manager.create_session(params)
+        session_manager.default_alpha_sessionid = sessionid
         logger.info("packed alpha webrtc offer sessionid=%s param_keys=%s", sessionid, sorted(params.keys()))
         avatar_session = session_manager.get_session(sessionid)
 
@@ -221,7 +223,7 @@ class RTCManager:
 
         from server.alpha_webrtc import PackedAlphaWebRTCPlayer
 
-        player = PackedAlphaWebRTCPlayer(avatar_session)
+        player = PackedAlphaWebRTCPlayer(avatar_session, params=params)
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():

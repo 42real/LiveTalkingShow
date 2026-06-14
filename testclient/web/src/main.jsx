@@ -30,6 +30,14 @@ function wsUrl(base, path) {
   return url.toString();
 }
 
+function httpUrl(base, path) {
+  const url = new URL(base);
+  const target = new URL(path, url.origin);
+  url.pathname = target.pathname;
+  url.search = target.search;
+  return url.toString();
+}
+
 const DEFAULT_LIVETALKING_URL = import.meta.env.VITE_LIVETALKING_URL || 'http://127.0.0.1:8050';
 const URL_PARAMS = new URLSearchParams(window.location.search);
 
@@ -37,9 +45,21 @@ function paramOrEnv(paramName, envName, fallback) {
   return URL_PARAMS.get(paramName) ?? import.meta.env[envName] ?? fallback;
 }
 
+function normalizeAlphaOutput(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (['webrtc-packed', 'packed-webrtc', 'packed', 'webrtc'].includes(mode)) return 'webrtc-packed';
+  if (['ws', 'websocket', 'raw'].includes(mode)) return 'ws';
+  return 'webrtc-packed';
+}
+
+function boolParamOrEnv(paramName, envName, fallback = false) {
+  const value = paramOrEnv(paramName, envName, fallback ? '1' : '0');
+  return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
+}
+
 const DEFAULTS = {
   liveTalkingUrl: DEFAULT_LIVETALKING_URL,
-  avatarId: import.meta.env.VITE_AVATAR_ID || 'mute_teacher_motion_v1_pad01000',
+  avatarId: paramOrEnv('avatar_id', 'VITE_AVATAR_ID', ''),
   ttsServerUrl: import.meta.env.VITE_TTS_SERVER_URL || 'http://127.0.0.1:8036',
   alphaInputWs: import.meta.env.VITE_ALPHA_INPUT_WS || wsUrl(DEFAULT_LIVETALKING_URL, '/alpha/input/audio'),
   text: import.meta.env.VITE_DEFAULT_TEXT || '这是一段 robottts 兼容接口流式测试。',
@@ -47,9 +67,14 @@ const DEFAULTS = {
   voiceId: Number.parseInt(import.meta.env.VITE_DEFAULT_VOICE_ID || '0', 10),
   mode: import.meta.env.VITE_DEFAULT_MODE || 'instruct2',
   audioSampleRate: Number.parseInt(import.meta.env.VITE_ALPHA_AUDIO_SAMPLE_RATE || '16000', 10),
+  alphaOutput: normalizeAlphaOutput(paramOrEnv('output', 'VITE_ALPHA_OUTPUT', 'webrtc-packed')),
+  alphaPlayAudio: boolParamOrEnv('play_audio', 'VITE_ALPHA_PLAY_AUDIO', false),
+  alphaRenderer: paramOrEnv('renderer', 'VITE_ALPHA_RENDERER', 'webgl').trim().toLowerCase(),
+  alphaForceOpaque: boolParamOrEnv('force_opaque', 'VITE_ALPHA_FORCE_OPAQUE', false),
+  videoMaxWidth: Number.parseInt(paramOrEnv('max_width', 'VITE_ALPHA_VIDEO_MAX_WIDTH', '0'), 10),
   videoMaxHeight: Number.parseInt(paramOrEnv('max_height', 'VITE_ALPHA_VIDEO_MAX_HEIGHT', '0'), 10),
-  videoPreviewFps: Number.parseFloat(paramOrEnv('fps', 'VITE_ALPHA_VIDEO_FPS', '25')),
-  videoFormat: paramOrEnv('format', 'VITE_ALPHA_VIDEO_FORMAT', 'raw'),
+  videoPreviewFps: Number.parseFloat(paramOrEnv('fps', 'VITE_ALPHA_VIDEO_FPS', '0')),
+  videoFormat: paramOrEnv('format', 'VITE_ALPHA_VIDEO_FORMAT', 'bgra'),
   videoQuality: Number.parseInt(paramOrEnv('quality', 'VITE_ALPHA_VIDEO_QUALITY', '80'), 10),
   videoRenderIntervalMs: Math.max(16, Number.parseInt(paramOrEnv('render_ms', 'VITE_VIDEO_RENDER_INTERVAL_MS', '40'), 10)),
   sharpness: Math.max(0, Math.min(100, Number.parseInt(paramOrEnv('sharpness', 'VITE_ALPHA_SHARPNESS', '0'), 10))),
@@ -100,15 +125,196 @@ function parseFrame(packet) {
   const seq = Number(view.getBigUint64(16, true));
   if (version !== 1 || width <= 0 || height <= 0) return null;
   const payload = packet.slice(24);
-  if (format === 1) {
+  if (format === 1 || format === 5) {
     const pixels = new Uint8ClampedArray(packet, 24);
     if (pixels.byteLength !== width * height * 4) return null;
-    return { width, height, seq, format, pixels };
+    return { width, height, seq, format, pixels, bgra: format === 5 };
   }
   if (format === 2 || format === 3 || format === 4) {
     return { width, height, seq, format, payload };
   }
   return null;
+}
+
+function bgraToRgba(bgra) {
+  const rgba = new Uint8ClampedArray(bgra.byteLength);
+  for (let i = 0; i < bgra.byteLength; i += 4) {
+    rgba[i] = bgra[i + 2];
+    rgba[i + 1] = bgra[i + 1];
+    rgba[i + 2] = bgra[i];
+    rgba[i + 3] = bgra[i + 3];
+  }
+  return rgba;
+}
+
+function waitIceComplete(peer) {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (peer.iceGatheringState === 'complete') {
+        peer.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+    };
+    peer.addEventListener('icegatheringstatechange', check);
+  });
+}
+
+function createShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(shader) || 'WebGL shader compile failed');
+  }
+  return shader;
+}
+
+function createProgram(gl, vertexSource, fragmentSource) {
+  const program = gl.createProgram();
+  gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fragmentSource));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(program) || 'WebGL program link failed');
+  }
+  gl.useProgram(program);
+  return program;
+}
+
+function createPackedAlphaRenderer(canvas, options = {}) {
+  if (options.renderer === '2d') {
+    return createPackedCanvas2dRenderer(canvas, options);
+  }
+  try {
+    return createPackedWebGLRenderer(canvas, options);
+  } catch (error) {
+    if (options.onFallback) options.onFallback(error);
+    return createPackedCanvas2dRenderer(canvas, options);
+  }
+}
+
+function createPackedWebGLRenderer(canvas, options = {}) {
+  const gl = canvas.getContext('webgl', {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    desynchronized: true,
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+    stencil: false
+  });
+  if (!gl) throw new Error('浏览器不支持 WebGL packed alpha 渲染');
+
+  const program = createProgram(
+    gl,
+    `
+      attribute vec2 aPosition;
+      attribute vec2 aTexCoord;
+      varying vec2 vTexCoord;
+      void main() {
+        gl_Position = vec4(aPosition, 0.0, 1.0);
+        vTexCoord = aTexCoord;
+      }
+    `,
+    `
+      precision mediump float;
+      uniform sampler2D uPacked;
+      uniform float uForceOpaque;
+      varying vec2 vTexCoord;
+      void main() {
+        vec2 colorCoord = vec2(vTexCoord.x * 0.5, vTexCoord.y);
+        vec2 alphaCoord = vec2(0.5 + vTexCoord.x * 0.5, vTexCoord.y);
+        vec4 color = texture2D(uPacked, colorCoord);
+        float alpha = mix(texture2D(uPacked, alphaCoord).r, 1.0, uForceOpaque);
+        gl_FragColor = vec4(color.rgb, alpha);
+      }
+    `
+  );
+
+  const vertices = new Float32Array([
+    -1, -1, 0, 1,
+     1, -1, 1, 1,
+    -1,  1, 0, 0,
+     1,  1, 1, 0
+  ]);
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
+  const position = gl.getAttribLocation(program, 'aPosition');
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
+
+  const texCoord = gl.getAttribLocation(program, 'aTexCoord');
+  gl.enableVertexAttribArray(texCoord);
+  gl.vertexAttribPointer(texCoord, 2, gl.FLOAT, false, stride, 2 * Float32Array.BYTES_PER_ELEMENT);
+
+  const texture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.useProgram(program);
+  gl.uniform1i(gl.getUniformLocation(program, 'uPacked'), 0);
+  gl.uniform1f(gl.getUniformLocation(program, 'uForceOpaque'), options.forceOpaque ? 1.0 : 0.0);
+  gl.disable(gl.BLEND);
+
+  return {
+    draw(video, logicalWidth, logicalHeight) {
+      if (canvas.width !== logicalWidth || canvas.height !== logicalHeight) {
+        canvas.width = logicalWidth;
+        canvas.height = logicalHeight;
+        gl.viewport(0, 0, logicalWidth, logicalHeight);
+      }
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+  };
+}
+
+function createPackedCanvas2dRenderer(canvas, options = {}) {
+  const outputCtx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  if (!outputCtx) throw new Error('浏览器不支持 Canvas 2D alpha 渲染');
+  const packedCanvas = document.createElement('canvas');
+  const packedCtx = packedCanvas.getContext('2d', { alpha: false, desynchronized: true });
+  if (!packedCtx) throw new Error('浏览器不支持 Canvas 2D packed 渲染');
+
+  return {
+    draw(video, logicalWidth, logicalHeight, packedWidth) {
+      const sourcePackedWidth = packedWidth || logicalWidth * 2;
+      if (canvas.width !== logicalWidth || canvas.height !== logicalHeight) {
+        canvas.width = logicalWidth;
+        canvas.height = logicalHeight;
+      }
+      if (packedCanvas.width !== sourcePackedWidth || packedCanvas.height !== logicalHeight) {
+        packedCanvas.width = sourcePackedWidth;
+        packedCanvas.height = logicalHeight;
+      }
+
+      packedCtx.drawImage(video, 0, 0, sourcePackedWidth, logicalHeight);
+      const color = packedCtx.getImageData(0, 0, logicalWidth, logicalHeight).data;
+      const alpha = options.forceOpaque
+        ? null
+        : packedCtx.getImageData(logicalWidth, 0, logicalWidth, logicalHeight).data;
+      const output = outputCtx.createImageData(logicalWidth, logicalHeight);
+      const target = output.data;
+      for (let index = 0; index < target.length; index += 4) {
+        target[index] = color[index];
+        target[index + 1] = color[index + 1];
+        target[index + 2] = color[index + 2];
+        target[index + 3] = alpha ? alpha[index] : 255;
+      }
+      outputCtx.putImageData(output, 0, 0);
+    }
+  };
 }
 
 function App() {
@@ -119,6 +325,8 @@ function App() {
   const [prompts, setPrompts] = useState(DEFAULTS.prompts);
   const [voiceId, setVoiceId] = useState(DEFAULTS.voiceId);
   const [mode, setMode] = useState(DEFAULTS.mode);
+  const [alphaOutput, setAlphaOutput] = useState(DEFAULTS.alphaOutput);
+  const [videoMaxWidth, setVideoMaxWidth] = useState(DEFAULTS.videoMaxWidth);
   const [videoMaxHeight, setVideoMaxHeight] = useState(DEFAULTS.videoMaxHeight);
   const [videoPreviewFps, setVideoPreviewFps] = useState(DEFAULTS.videoPreviewFps);
   const [videoRenderIntervalMs, setVideoRenderIntervalMs] = useState(DEFAULTS.videoRenderIntervalMs);
@@ -153,6 +361,16 @@ function App() {
   const slideInputRef = useRef(null);
   const socketRef = useRef(null);
   const audioSocketRef = useRef(null);
+  const rtcPeerRef = useRef(null);
+  const rtcAudioTrackRef = useRef(null);
+  const rtcAudioElementRef = useRef(null);
+  const packedVideoRef = useRef(null);
+  const packedRendererRef = useRef(null);
+  const packedRenderHandleRef = useRef(null);
+  const packedRenderHandleTypeRef = useRef('');
+  const packedConnectTokenRef = useRef(0);
+  const playPackedAudioRef = useRef(DEFAULTS.alphaPlayAudio);
+  const packedFirstFrameLoggedRef = useRef(false);
   const audioContextRef = useRef(null);
   const audioScheduleRef = useRef(0);
   const latestFramePacketRef = useRef(null);
@@ -179,11 +397,12 @@ function App() {
       tts,
       alphaWs: wsUrl(
         live,
-        `/alpha/ws?max_height=${videoMaxHeight}&fps=${videoPreviewFps}&format=${DEFAULTS.videoFormat}&quality=${DEFAULTS.videoQuality}`
+        `/alpha/ws?max_width=${videoMaxWidth}&max_height=${videoMaxHeight}&fps=${videoPreviewFps}&format=${DEFAULTS.videoFormat}&quality=${DEFAULTS.videoQuality}`
       ),
+      packedOffer: httpUrl(live, '/alpha/webrtc/packed_offer'),
       audioWs: wsUrl(live, '/alpha/audio')
     };
-  }, [liveTalkingUrl, ttsServerUrl, videoMaxHeight, videoPreviewFps]);
+  }, [liveTalkingUrl, ttsServerUrl, videoMaxHeight, videoMaxWidth, videoPreviewFps]);
 
   const updateCanvasBox = useCallback(() => {
     const canvas = canvasRef.current;
@@ -246,8 +465,12 @@ function App() {
       canvas.height = frame.height;
     }
     const ctx = canvas.getContext('2d');
-    if (frame.format === 1) {
-      ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
+    if (frame.format === 1 || frame.format === 5) {
+      ctx.putImageData(
+        new ImageData(frame.bgra ? bgraToRgba(frame.pixels) : frame.pixels, frame.width, frame.height),
+        0,
+        0
+      );
     } else {
       const mime = frame.format === 2 ? 'image/jpeg' : frame.format === 3 ? 'image/png' : 'image/webp';
       const bitmap = await createImageBitmap(new Blob([frame.payload], { type: mime }));
@@ -297,7 +520,313 @@ function App() {
     renderTimerRef.current = window.setTimeout(renderLatestFrame, wait);
   }, [renderLatestFrame, videoRenderIntervalMs]);
 
+  const stopPackedRenderLoop = useCallback(() => {
+    const handle = packedRenderHandleRef.current;
+    if (handle === null) return;
+    const video = packedVideoRef.current;
+    if (
+      packedRenderHandleTypeRef.current === 'videoFrame' &&
+      video &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      video.cancelVideoFrameCallback(handle);
+    } else {
+      cancelAnimationFrame(handle);
+    }
+    packedRenderHandleRef.current = null;
+    packedRenderHandleTypeRef.current = '';
+  }, []);
+
+  const stopPackedAudioPlayback = useCallback(() => {
+    const audio = rtcAudioElementRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.srcObject = null;
+    audio.remove();
+    rtcAudioElementRef.current = null;
+  }, []);
+
+  const applyPackedAudioPlayback = useCallback(() => {
+    const track = rtcAudioTrackRef.current;
+    if (!track || alphaOutput !== 'webrtc-packed') return;
+    if (!playPackedAudioRef.current) {
+      stopPackedAudioPlayback();
+      return;
+    }
+    let audio = rtcAudioElementRef.current;
+    if (!audio) {
+      audio = document.createElement('audio');
+      audio.autoplay = true;
+      audio.controls = false;
+      audio.style.display = 'none';
+      document.body.appendChild(audio);
+      rtcAudioElementRef.current = audio;
+    }
+    audio.srcObject = new MediaStream([track]);
+    audio.play()
+      .then(() => {
+        setAudioState('connected');
+        addLog('packed WebRTC 音频已启用');
+      })
+      .catch((error) => {
+        setAudioState('error');
+        addLog('packed WebRTC 音频播放失败', { error: String(error) });
+      });
+  }, [addLog, alphaOutput, stopPackedAudioPlayback]);
+
+  const stopPackedWebRTC = useCallback((invalidatePending = true) => {
+    if (invalidatePending) packedConnectTokenRef.current += 1;
+    stopPackedRenderLoop();
+    const peer = rtcPeerRef.current;
+    rtcPeerRef.current = null;
+    if (peer) {
+      peer.ontrack = null;
+      peer.onconnectionstatechange = null;
+      peer.oniceconnectionstatechange = null;
+      for (const sender of peer.getSenders()) {
+        sender.track?.stop();
+      }
+      for (const receiver of peer.getReceivers()) {
+        receiver.track?.stop();
+      }
+      peer.close();
+    }
+    const video = packedVideoRef.current;
+    if (video) {
+      video.pause();
+      video.srcObject = null;
+      video.remove();
+      packedVideoRef.current = null;
+    }
+    rtcAudioTrackRef.current = null;
+    stopPackedAudioPlayback();
+  }, [stopPackedAudioPlayback, stopPackedRenderLoop]);
+
+  const drawPackedVideoFrame = useCallback(() => {
+    const video = packedVideoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.readyState < 2) return;
+
+    const packedWidth = video.videoWidth || 0;
+    const height = video.videoHeight || 0;
+    const width = Math.max(1, Math.floor(packedWidth / 2));
+    if (!packedWidth || !height) return;
+
+    const renderer = packedRendererRef.current || createPackedAlphaRenderer(canvas, {
+      renderer: DEFAULTS.alphaRenderer,
+      forceOpaque: DEFAULTS.alphaForceOpaque,
+      onFallback: (error) => addLog('WebGL packed 渲染不可用，回退 Canvas 2D', { error: String(error) })
+    });
+    packedRendererRef.current = renderer;
+    renderer.draw(video, width, height, packedWidth);
+    window.requestAnimationFrame(updateCanvasBox);
+
+    const stats = frameStatsRef.current;
+    const now = performance.now();
+    const elapsed = now - stats.lastAt;
+    let fps = stats.fps;
+    if (elapsed >= 1000) {
+      fps = ((stats.lastSeq + 1) * 1000) / elapsed;
+      stats.lastAt = now;
+      stats.lastSeq = 0;
+      stats.fps = fps;
+    } else {
+      stats.lastSeq += 1;
+    }
+    setFrameInfo((current) => ({
+      width,
+      height,
+      seq: current.seq + 1,
+      fps
+    }));
+    if (!packedFirstFrameLoggedRef.current) {
+      packedFirstFrameLoggedRef.current = true;
+      addLog('packed WebRTC 首帧已绘制', {
+        renderer: DEFAULTS.alphaRenderer,
+        force_opaque: DEFAULTS.alphaForceOpaque,
+        packedWidth,
+        width,
+        height,
+        videoReadyState: video.readyState
+      });
+    }
+  }, [addLog, updateCanvasBox]);
+
+  const schedulePackedRenderFrame = useCallback(() => {
+    const video = packedVideoRef.current;
+    if (!video || alphaOutput !== 'webrtc-packed') return;
+    if (packedRenderHandleRef.current !== null) return;
+    if (
+      video.readyState >= 2 &&
+      typeof video.requestVideoFrameCallback === 'function'
+    ) {
+      packedRenderHandleTypeRef.current = 'videoFrame';
+      packedRenderHandleRef.current = video.requestVideoFrameCallback(() => {
+        packedRenderHandleRef.current = null;
+        drawPackedVideoFrame();
+        schedulePackedRenderFrame();
+      });
+      return;
+    }
+
+    packedRenderHandleTypeRef.current = 'animationFrame';
+    packedRenderHandleRef.current = requestAnimationFrame(() => {
+      packedRenderHandleRef.current = null;
+      drawPackedVideoFrame();
+      schedulePackedRenderFrame();
+    });
+  }, [alphaOutput, drawPackedVideoFrame]);
+
+  const attachPackedVideoTrack = useCallback((track) => {
+    stopPackedRenderLoop();
+    if (packedVideoRef.current) {
+      packedVideoRef.current.pause();
+      packedVideoRef.current.srcObject = null;
+      packedVideoRef.current.remove();
+    }
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true;
+    video.style.display = 'none';
+    packedFirstFrameLoggedRef.current = false;
+    video.srcObject = new MediaStream([track]);
+    document.body.appendChild(video);
+    packedVideoRef.current = video;
+    video.addEventListener('loadedmetadata', () => {
+      const packedWidth = video.videoWidth || 0;
+      const height = video.videoHeight || 0;
+      const width = Math.max(1, Math.floor(packedWidth / 2));
+      addLog('packed WebRTC 视频元数据', { packedWidth, width, height });
+      setFrameInfo({ width, height, seq: 0, fps: 0 });
+      schedulePackedRenderFrame();
+    });
+    video.play()
+      .then(schedulePackedRenderFrame)
+      .catch((error) => addLog('packed WebRTC 视频播放失败', { error: String(error) }));
+  }, [addLog, schedulePackedRenderFrame, stopPackedRenderLoop]);
+
+  const connectPackedWebRTC = useCallback(async () => {
+    stopPackedWebRTC(false);
+    const connectToken = packedConnectTokenRef.current + 1;
+    packedConnectTokenRef.current = connectToken;
+    socketRef.current?.close();
+    socketRef.current = null;
+    setVideoState('connecting');
+    addLog('连接 packed WebRTC alpha 视频', {
+      url: normalized.packedOffer,
+      max_width: videoMaxWidth,
+      max_height: videoMaxHeight,
+      fps: videoPreviewFps
+    });
+
+    const peer = new RTCPeerConnection({
+      sdpSemantics: 'unified-plan',
+      bundlePolicy: 'max-bundle'
+    });
+    rtcPeerRef.current = peer;
+
+    const isCurrentPeer = () => packedConnectTokenRef.current === connectToken && rtcPeerRef.current === peer;
+    const closeStalePeer = () => {
+      try {
+        peer.close();
+      } catch (_) {
+        // Ignore stale peer cleanup errors.
+      }
+    };
+
+    peer.addTransceiver('audio', { direction: 'recvonly' });
+    peer.addTransceiver('video', { direction: 'recvonly' });
+
+    peer.addEventListener('connectionstatechange', () => {
+      if (!isCurrentPeer()) return;
+      addLog('packed WebRTC 连接状态', { state: peer.connectionState });
+      if (peer.connectionState === 'connected') setVideoState('connected');
+      if (['failed', 'disconnected', 'closed'].includes(peer.connectionState)) setVideoState('disconnected');
+    });
+    peer.addEventListener('iceconnectionstatechange', () => {
+      if (!isCurrentPeer()) return;
+      addLog('packed WebRTC ICE 状态', { state: peer.iceConnectionState });
+    });
+    peer.addEventListener('track', (event) => {
+      if (!isCurrentPeer()) return;
+      addLog('packed WebRTC 收到 track', { kind: event.track.kind, id: event.track.id });
+      if (event.track.kind === 'audio') {
+        rtcAudioTrackRef.current = event.track;
+        applyPackedAudioPlayback();
+      } else {
+        attachPackedVideoTrack(event.track);
+      }
+    });
+
+    const offer = await peer.createOffer();
+    if (!isCurrentPeer()) {
+      closeStalePeer();
+      return;
+    }
+    await peer.setLocalDescription(offer);
+    if (!isCurrentPeer()) {
+      closeStalePeer();
+      return;
+    }
+    await waitIceComplete(peer);
+    if (!isCurrentPeer()) {
+      closeStalePeer();
+      return;
+    }
+
+    const body = {
+      sdp: peer.localDescription.sdp,
+      type: peer.localDescription.type
+    };
+    if (videoMaxWidth > 0) body.max_width = videoMaxWidth;
+    if (videoMaxHeight > 0) body.max_height = videoMaxHeight;
+    if (videoPreviewFps > 0) body.fps = videoPreviewFps;
+
+    const response = await fetch(normalized.packedOffer, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const answer = await response.json();
+    if (!isCurrentPeer()) {
+      closeStalePeer();
+      addLog('忽略过期 packed WebRTC 应答');
+      return;
+    }
+    if (!response.ok || !answer.sdp) {
+      throw new Error(answer.msg || `packed offer failed: ${response.status}`);
+    }
+    if (answer.sessionid) setSessionId(String(answer.sessionid));
+    await peer.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
+    if (!isCurrentPeer()) {
+      closeStalePeer();
+      return;
+    }
+    addLog('packed WebRTC 已连接', {
+      sessionid: answer.sessionid,
+      tracks: answer.tracks
+    });
+  }, [
+    addLog,
+    applyPackedAudioPlayback,
+    attachPackedVideoTrack,
+    normalized.packedOffer,
+    stopPackedWebRTC,
+    videoMaxHeight,
+    videoMaxWidth,
+    videoPreviewFps
+  ]);
+
   const connectVideo = useCallback(() => {
+    if (alphaOutput === 'webrtc-packed') {
+      connectPackedWebRTC().catch((error) => {
+        setVideoState('error');
+        addLog('packed WebRTC 连接失败', { error: String(error) });
+      });
+      return;
+    }
+    stopPackedWebRTC();
     if (socketRef.current) socketRef.current.close();
     const socket = new WebSocket(normalized.alphaWs);
     socket.binaryType = 'arraybuffer';
@@ -317,18 +846,19 @@ function App() {
       setVideoState('disconnected');
       addLog('alpha 视频流已断开', { code: event.code });
     };
-  }, [addLog, enqueueVideoFrame, normalized.alphaWs]);
+  }, [addLog, alphaOutput, connectPackedWebRTC, enqueueVideoFrame, normalized.alphaWs, stopPackedWebRTC]);
 
   const disconnectVideo = useCallback(() => {
     socketRef.current?.close();
     socketRef.current = null;
+    stopPackedWebRTC();
     latestFramePacketRef.current = null;
     if (renderTimerRef.current) {
       clearTimeout(renderTimerRef.current);
       renderTimerRef.current = 0;
     }
     setVideoState('disconnected');
-  }, []);
+  }, [stopPackedWebRTC]);
 
   const playAudioChunk = useCallback((packet) => {
     const audioContext = audioContextRef.current;
@@ -380,6 +910,13 @@ function App() {
   }, []);
 
   const connectAudio = useCallback(async () => {
+    if (alphaOutput === 'webrtc-packed') {
+      playPackedAudioRef.current = true;
+      setAudioState(rtcAudioTrackRef.current ? 'connecting' : 'waiting');
+      addLog('启用 packed WebRTC 音频播放');
+      applyPackedAudioPlayback();
+      return;
+    }
     disconnectAudio();
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) {
@@ -410,12 +947,18 @@ function App() {
       setAudioState('disconnected');
       addLog('alpha 音频流已断开', { code: event.code });
     };
-  }, [addLog, disconnectAudio, normalized.audioWs, playAudioChunk]);
+  }, [addLog, alphaOutput, applyPackedAudioPlayback, disconnectAudio, normalized.audioWs, playAudioChunk]);
+
+  const disconnectAnyAudio = useCallback(() => {
+    playPackedAudioRef.current = false;
+    stopPackedAudioPlayback();
+    disconnectAudio();
+  }, [disconnectAudio, stopPackedAudioPlayback]);
 
   useEffect(() => () => {
     disconnectVideo();
-    disconnectAudio();
-  }, [disconnectAudio, disconnectVideo]);
+    disconnectAnyAudio();
+  }, [disconnectAnyAudio, disconnectVideo]);
 
   const checkHealth = async () => {
     setStatus('checking');
@@ -473,10 +1016,8 @@ function App() {
 
   const refreshMotionClips = useCallback(async (targetSessionId = sessionId, options = {}) => {
     try {
-      const query = new URLSearchParams({
-        kind: 'speaking',
-        avatar_id: DEFAULTS.avatarId
-      });
+      const query = new URLSearchParams({ kind: 'speaking' });
+      if (DEFAULTS.avatarId) query.set('avatar_id', DEFAULTS.avatarId);
       if (targetSessionId) query.set('sessionid', targetSessionId);
       if (options.reload) query.set('reload', '1');
       const resp = await fetch(`${normalized.live}/motion/clips?${query.toString()}`);
@@ -484,9 +1025,14 @@ function App() {
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'motion clips failed');
       const clips = Array.isArray(payload.data?.clips) ? payload.data.clips : [];
       setMotionClips(clips);
-      const current = clips.find((clip) => clip.current);
-      if (current?.action_id) {
+      const poolSelected = clips.some((clip) => clip.pool_selected);
+      const current = clips.find((clip) => clip.selected || clip.current);
+      if (poolSelected) {
+        setSelectedMotion('auto');
+      } else if (current?.action_id) {
         setSelectedMotion(current.action_id);
+      } else {
+        setSelectedMotion('');
       }
       addLog('说话动作已刷新', { clips: clips.map((clip) => clip.action_id) });
     } catch (error) {
@@ -496,10 +1042,8 @@ function App() {
 
   const refreshIdleClips = useCallback(async (targetSessionId = sessionId, options = {}) => {
     try {
-      const query = new URLSearchParams({
-        kind: 'idle',
-        avatar_id: DEFAULTS.avatarId
-      });
+      const query = new URLSearchParams({ kind: 'idle' });
+      if (DEFAULTS.avatarId) query.set('avatar_id', DEFAULTS.avatarId);
       if (targetSessionId) query.set('sessionid', targetSessionId);
       if (options.reload) query.set('reload', '1');
       const resp = await fetch(`${normalized.live}/motion/clips?${query.toString()}`);
@@ -507,8 +1051,11 @@ function App() {
       if (!resp.ok || payload.code !== 0) throw new Error(payload.msg || 'idle clips failed');
       const clips = Array.isArray(payload.data?.clips) ? payload.data.clips : [];
       setIdleClips(clips);
-      const current = clips.find((clip) => clip.current);
-      if (current?.action_id) {
+      const poolSelected = clips.some((clip) => clip.pool_selected);
+      const current = clips.find((clip) => clip.selected || clip.current);
+      if (poolSelected) {
+        setSelectedIdleMotion('auto');
+      } else if (current?.action_id) {
         setSelectedIdleMotion(current.action_id);
       } else {
         setSelectedIdleMotion('');
@@ -720,6 +1267,14 @@ function App() {
   }, [pads, updatePads]);
 
   const createSession = async () => {
+    if (alphaOutput === 'webrtc-packed') {
+      if (sessionId && rtcPeerRef.current) {
+        addLog('packed WebRTC session 已存在', { sessionid: sessionId });
+        return;
+      }
+      addLog('packed WebRTC 模式由视频连接创建 session，请点击视频');
+      return;
+    }
     try {
       const resp = await fetch(`${normalized.live}/alpha/session`, {
         method: 'POST',
@@ -741,9 +1296,11 @@ function App() {
   useEffect(() => {
     if (!DEFAULTS.alphaAutoConnect || alphaAutoStartedRef.current) return;
     alphaAutoStartedRef.current = true;
-    createSession();
+    if (alphaOutput !== 'webrtc-packed') {
+      createSession();
+    }
     connectVideo();
-  }, [connectVideo]);
+  }, [alphaOutput, connectVideo]);
 
   const speakViaLiveTalking = async () => {
     setStatus('speaking');
@@ -883,6 +1440,14 @@ function App() {
             <input value={alphaInputWs} onChange={(event) => setAlphaInputWs(event.target.value)} />
           </label>
 
+          <label>
+            Alpha Output
+            <select value={alphaOutput} onChange={(event) => setAlphaOutput(normalizeAlphaOutput(event.target.value))}>
+              <option value="webrtc-packed">webrtc-packed</option>
+              <option value="ws">ws</option>
+            </select>
+          </label>
+
           <div className="grid2">
             <label>
               Voice
@@ -903,6 +1468,16 @@ function App() {
           </div>
 
           <div className="grid2">
+            <label>
+              Max Width
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={videoMaxWidth}
+                onChange={(event) => setVideoMaxWidth(Number.parseInt(event.target.value || '0', 10))}
+              />
+            </label>
             <label>
               Max Height
               <input
@@ -988,6 +1563,7 @@ function App() {
               当前动作片段
               <select value={selectedMotion} onChange={(event) => selectMotionClip(event.target.value)}>
                 <option value="">默认动作</option>
+                <option value="auto">自动素材池</option>
                 {motionClips.map((clip) => (
                   <option value={clip.action_id} key={clip.action_id}>
                     {clip.display_name || clip.action_id} ({clip.frame_count || 0})
@@ -997,6 +1573,15 @@ function App() {
             </label>
             <div className="clipList">
               {motionClips.length === 0 && <span className="clipEmpty">暂无动作片段</span>}
+              {motionClips.length > 0 && (
+                <button
+                  type="button"
+                  className={`clipPill ${selectedMotion === 'auto' ? 'clipPillActive' : ''}`}
+                  onClick={() => selectMotionClip('auto')}
+                >
+                  自动素材池
+                </button>
+              )}
               {motionClips.map((clip) => (
                 <button
                   type="button"
@@ -1025,7 +1610,8 @@ function App() {
             <label>
               当前静息片段
               <select value={selectedIdleMotion} onChange={(event) => selectIdleClip(event.target.value)}>
-                <option value="">固定第一帧</option>
+                <option value="">默认动作</option>
+                <option value="auto">自动素材池</option>
                 {idleClips.map((clip) => (
                   <option value={clip.action_id} key={clip.action_id}>
                     {clip.display_name || clip.action_id} ({clip.frame_count || 0})
@@ -1035,6 +1621,15 @@ function App() {
             </label>
             <div className="clipList">
               {idleClips.length === 0 && <span className="clipEmpty">暂无静息动作片段</span>}
+              {idleClips.length > 0 && (
+                <button
+                  type="button"
+                  className={`clipPill ${selectedIdleMotion === 'auto' ? 'clipPillActive' : ''}`}
+                  onClick={() => selectIdleClip('auto')}
+                >
+                  自动素材池
+                </button>
+              )}
               {idleClips.map((clip) => (
                 <button
                   type="button"
@@ -1141,7 +1736,7 @@ function App() {
             <button onClick={connectVideo}><Video size={16} />视频</button>
             <button onClick={disconnectVideo}><Square size={16} />断开</button>
             <button onClick={connectAudio}><Volume2 size={16} />音频</button>
-            <button onClick={disconnectAudio}><VolumeX size={16} />静音</button>
+            <button onClick={disconnectAnyAudio}><VolumeX size={16} />静音</button>
             <button onClick={speakViaLiveTalking}><Send size={16} />alpha/speak</button>
             <button onClick={pushViaTask}><Mic size={16} />TTS task</button>
             <button onClick={interrupt}><Square size={16} />打断</button>
@@ -1151,7 +1746,7 @@ function App() {
         <div className={`panel videoPanel ${classroomMode ? 'classroomPanel' : ''}`}>
           <div className="videoHead">
             <span>{classroomMode ? '课堂展示' : 'Alpha Video'}</span>
-            <span>{videoState} | {frameInfo.width}x{frameInfo.height} | #{frameInfo.seq} | {frameInfo.fps.toFixed(1)} fps</span>
+            <span>{alphaOutput} | {videoState} | {frameInfo.width}x{frameInfo.height} | #{frameInfo.seq} | {frameInfo.fps.toFixed(1)} fps</span>
           </div>
           <div
             className={`canvasWrap ${DEFAULTS.videoFit === 'native' ? 'canvasWrapNative' : ''} ${classroomMode ? 'classroomStage' : ''}`}

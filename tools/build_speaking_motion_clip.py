@@ -24,6 +24,39 @@ from avatars.wav2lip import face_detection
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 DEFAULT_FFMPEG = which("ffmpeg") or "ffmpeg"
+PLAY_MODES = {"forward", "pingpong", "reverse", "random_direction"}
+MOTION_STRATEGIES = {"sequence", "random", "weighted_random", "no_repeat_random", "weighted_no_repeat"}
+AVATAR_MOTION_CONFIG = "motion.json"
+
+
+def normalize_play_mode(value: str, default: str = "forward") -> str:
+    play_mode = str(value or default).strip().lower()
+    return play_mode if play_mode in PLAY_MODES else default
+
+
+def infer_kind_from_out_root(out_root: str) -> str:
+    normalized = str(out_root or "").replace("\\", "/").rstrip("/")
+    if normalized.endswith("/motions/idle") or normalized.endswith("motions/idle"):
+        return "idle"
+    if normalized.endswith("/motions/speaking") or normalized.endswith("motions/speaking"):
+        return "speaking"
+    return "idle" if normalized.endswith("idle_actions") else "speaking"
+
+
+def clamp_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def clamp_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def write_png(path: Path, image: np.ndarray) -> None:
@@ -92,9 +125,35 @@ def chroma_key_green(bgr: np.ndarray) -> np.ndarray:
 
 
 def frame_for_detection(frame: np.ndarray) -> np.ndarray:
+    if frame.ndim == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     if frame.ndim == 3 and frame.shape[2] == 4:
         return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    if frame.ndim == 3 and frame.shape[2] == 1:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     return frame
+
+
+def normalize_source_frame(frame: np.ndarray) -> np.ndarray:
+    if frame.ndim == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    if frame.ndim == 3 and frame.shape[2] == 1:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    if frame.ndim == 3 and frame.shape[2] in (3, 4):
+        return frame
+    raise RuntimeError(f"Unsupported source frame shape: {frame.shape}")
+
+
+def ensure_consistent_frames(frames: list[np.ndarray]) -> None:
+    if not frames:
+        return
+    base_shape = frames[0].shape
+    for index, frame in enumerate(frames[1:], start=1):
+        if frame.shape != base_shape:
+            raise RuntimeError(
+                f"All source frames must have the same shape. "
+                f"frame 0 is {base_shape}, frame {index} is {frame.shape}"
+            )
 
 
 def load_source_frames(
@@ -109,9 +168,10 @@ def load_source_frames(
         images = list_images(source)
         if not images:
             raise RuntimeError(f"No images found in: {source}")
-        frames = [read_image(path) for path in images]
+        frames = [normalize_source_frame(read_image(path)) for path in images]
         if max_frames > 0:
             frames = frames[:max_frames]
+        ensure_consistent_frames(frames)
         return frames, {
             "source_type": "image_dir",
             "source_fps": None,
@@ -150,7 +210,7 @@ def load_source_frames(
 
         if chroma_key:
             frame = chroma_key_green(frame)
-        frames.append(frame)
+        frames.append(normalize_source_frame(frame))
         next_sample_at += target_interval
 
         if max_frames > 0 and len(frames) >= max_frames:
@@ -159,6 +219,7 @@ def load_source_frames(
     cap.release()
     if not frames:
         raise RuntimeError("No frames selected from source")
+    ensure_consistent_frames(frames)
 
     return frames, {
         "source_type": "video",
@@ -217,8 +278,13 @@ def detect_boxes(
         predictions = []
         try:
             for index in tqdm(range(0, len(detect_frames), current_batch_size), desc="detect faces"):
-                batch = np.asarray(detect_frames[index : index + current_batch_size])
-                predictions.extend(detector.get_detections_for_batch(batch))
+                batch_frames = detect_frames[index : index + current_batch_size]
+                if len({frame.shape for frame in batch_frames}) == 1:
+                    batch = np.asarray(batch_frames)
+                    predictions.extend(detector.get_detections_for_batch(batch))
+                else:
+                    for frame in batch_frames:
+                        predictions.extend(detector.get_detections_for_batch(np.asarray([frame])))
         except RuntimeError:
             if current_batch_size == 1:
                 raise
@@ -279,9 +345,94 @@ def make_preview(frame: np.ndarray, box: tuple[int, int, int, int], label: str) 
     return preview
 
 
+def target_root_for_args(args: argparse.Namespace) -> Path:
+    layout = str(getattr(args, "layout", "avatar-local") or "avatar-local").strip().lower()
+    kind = str(getattr(args, "kind", "") or "").strip().lower()
+    if kind in {"idle", "silent", "silence", "rest"}:
+        kind = "idle"
+    elif kind != "speaking":
+        kind = infer_kind_from_out_root(getattr(args, "out_root", ""))
+
+    out_root = str(getattr(args, "out_root", "") or "").strip()
+    if layout == "legacy" or out_root:
+        root = Path(out_root or ("data/idle_actions" if kind == "idle" else "data/speaking_actions"))
+        return root / args.avatar_id / args.action_id
+    return Path("data") / "avatars" / args.avatar_id / "motions" / kind / args.action_id
+
+
+def read_avatar_motion_config(avatar_id: str) -> dict:
+    path = Path("data") / "avatars" / avatar_id / AVATAR_MOTION_CONFIG
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_avatar_motion_config(avatar_id: str, config: dict) -> None:
+    path = Path("data") / "avatars" / avatar_id / AVATAR_MOTION_CONFIG
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def ensure_avatar_motion_config(avatar_id: str) -> dict:
+    config = read_avatar_motion_config(avatar_id)
+    if not config:
+        config = {
+            "version": 1,
+            "layout": "avatar-local-motion",
+            "strategy": "weighted_no_repeat",
+            "states": {},
+        }
+    states = config.setdefault("states", {})
+    for kind in ("idle", "speaking"):
+        state = states.setdefault(kind, {})
+        state.setdefault("path", f"motions/{kind}")
+        state.setdefault("selection", "auto")
+        state.setdefault("strategy", config.get("strategy", "weighted_no_repeat"))
+        state.setdefault("default_play_mode", "forward")
+        state.setdefault("clips", [])
+    config.setdefault("version", 1)
+    config.setdefault("layout", "avatar-local-motion")
+    config.setdefault("strategy", "weighted_no_repeat")
+    write_avatar_motion_config(avatar_id, config)
+    return config
+
+
+def sync_avatar_motion_config(args: argparse.Namespace, metadata: dict) -> None:
+    layout = str(getattr(args, "layout", "avatar-local") or "avatar-local").strip().lower()
+    if layout == "legacy" or str(getattr(args, "out_root", "") or "").strip():
+        return
+    kind = str(metadata.get("kind") or "speaking").strip().lower()
+    if kind not in {"idle", "speaking"}:
+        kind = "speaking"
+    config = ensure_avatar_motion_config(args.avatar_id)
+    state = config.setdefault("states", {}).setdefault(kind, {})
+    clips = state.setdefault("clips", [])
+    clips = [clip for clip in clips if isinstance(clip, dict) and clip.get("action_id") != args.action_id]
+    clips.append({
+        "action_id": args.action_id,
+        "display_name": metadata.get("display_name", args.action_id),
+        "description": metadata.get("description", ""),
+        "best_for": metadata.get("best_for", ""),
+        "enabled": bool(metadata.get("enabled", True)),
+        "weight": clamp_float(metadata.get("weight", 1.0), 1.0, 0.0, 1000.0),
+        "play_mode": normalize_play_mode(metadata.get("play_mode", "forward")),
+        "can_reverse": bool(metadata.get("can_reverse", False)),
+        "min_cycles": int(metadata.get("min_cycles", 1) or 1),
+        "max_cycles": int(metadata.get("max_cycles", metadata.get("min_cycles", 1)) or 1),
+        "switch_at_boundary": bool(metadata.get("switch_at_boundary", True)),
+        "tags": metadata.get("tags", []),
+    })
+    state["clips"] = sorted(clips, key=lambda clip: str(clip.get("action_id", "")))
+    write_avatar_motion_config(args.avatar_id, config)
+
+
 def build_clip(args: argparse.Namespace) -> None:
     source = Path(args.source)
-    target = Path(args.out_root) / args.avatar_id / args.action_id
+    target = target_root_for_args(args)
     full_dir = target / "full_imgs"
     face_dir = target / "face_imgs"
     coords_path = target / "coords.pkl"
@@ -342,10 +493,15 @@ def build_clip(args: argparse.Namespace) -> None:
     preview = make_preview(frames[preview_frame_index], boxes[preview_frame_index], args.action_id)
     write_png(preview_path, preview)
 
+    min_cycles = clamp_int(getattr(args, "min_cycles", 1), 1, 1, 100)
+    max_cycles = clamp_int(getattr(args, "max_cycles", min_cycles), min_cycles, 1, 100)
+    if max_cycles < min_cycles:
+        max_cycles = min_cycles
     metadata = {
         "action_id": args.action_id,
         "display_name": args.display_name or args.action_id,
         "avatar_id": args.avatar_id,
+        "kind": infer_kind_from_out_root(str(target.parent)),
         "source": str(source),
         "cut_video": str(cut_video_path) if cut_video_path else "",
         "source_info": source_info,
@@ -358,12 +514,20 @@ def build_clip(args: argparse.Namespace) -> None:
         "tags": [tag.strip() for tag in args.tags.split(",") if tag.strip()],
         "best_for": args.best_for,
         "chroma_key": bool(args.chroma_key),
+        "play_mode": normalize_play_mode(getattr(args, "play_mode", "forward")),
+        "can_reverse": bool(getattr(args, "can_reverse", False)),
+        "weight": clamp_float(getattr(args, "weight", 1.0), 1.0, 0.0, 1000.0),
+        "min_cycles": min_cycles,
+        "max_cycles": max_cycles,
+        "switch_at_boundary": bool(getattr(args, "switch_at_boundary", True)),
+        "enabled": bool(getattr(args, "enabled", True)),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     metadata_path.write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    sync_avatar_motion_config(args, metadata)
 
     print(f"motion clip: {target}")
     print(f"frames: {len(frames)}")
@@ -377,7 +541,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--avatar-id", required=True)
     parser.add_argument("--action-id", required=True)
     parser.add_argument("--display-name", default="")
-    parser.add_argument("--out-root", default="data/speaking_actions")
+    parser.add_argument("--kind", default="speaking", choices=["speaking", "idle"], help="Motion state for avatar-local layout.")
+    parser.add_argument("--layout", default="avatar-local", choices=["avatar-local", "legacy"], help="avatar-local writes under data/avatars/<avatar_id>/motions; legacy uses data/*_actions.")
+    parser.add_argument("--out-root", default="", help="Explicit legacy output root. If set, overrides --layout.")
     parser.add_argument("--start", type=float, default=0.0)
     parser.add_argument("--end", type=float)
     parser.add_argument("--fps", type=float, default=25.0)
@@ -388,6 +554,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0, help="Limit frames for quick tests; 0 means no limit.")
     parser.add_argument("--tags", default="speaking,teaching")
     parser.add_argument("--best-for", default="")
+    parser.add_argument("--play-mode", default="forward", choices=sorted(PLAY_MODES))
+    parser.add_argument("--can-reverse", action="store_true")
+    parser.add_argument("--weight", type=float, default=1.0)
+    parser.add_argument("--min-cycles", type=int, default=1)
+    parser.add_argument("--max-cycles", type=int, default=1)
+    parser.add_argument("--switch-at-boundary", dest="switch_at_boundary", action="store_true", default=True)
+    parser.add_argument("--no-switch-at-boundary", dest="switch_at_boundary", action="store_false")
+    parser.add_argument("--enabled", dest="enabled", action="store_true", default=True)
+    parser.add_argument("--disabled", dest="enabled", action="store_false")
     parser.add_argument("--chroma-key", action="store_true")
     parser.add_argument("--use-ffmpeg-cut", action="store_true")
     parser.add_argument("--ffmpeg-path", default=DEFAULT_FFMPEG)

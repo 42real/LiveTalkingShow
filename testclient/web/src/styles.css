@@ -281,6 +281,11 @@ a.buttonLink:hover {
   width: auto;
 }
 
+.motionChecks {
+  display: grid;
+  gap: 6px;
+}
+
 .videoPanel {
   min-width: 0;
   padding: 12px;
@@ -849,6 +854,10 @@ canvas {
   border: 1px solid #93c5fd;
   border-radius: 4px;
   padding: 2px 6px;
+}
+
+.clipMetaRow {
+  color: #334155;
 }
 
 .clipEditBox {
